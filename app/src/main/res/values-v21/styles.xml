@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="AppThemeModern" />
+    <style name="AppThemeModern" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#0A7D5A</item>
+        <item name="android:colorAccent">#0A7D5A</item>
+        <item name="android:windowBackground">@android:color/white</item>
+        <item name="android:statusBarColor">#F2F4F7</item>
+        <item name="android:navigationBarColor">#F2F4F7</item>
+        <item name="android:alertDialogTheme">@style/AppDialog</item>
+    </style>
+
+    <style name="AppThemeDark" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">#34D399</item>
+        <item name="android:colorAccent">#34D399</item>
+        <item name="android:windowBackground">#0F1115</item>
+        <item name="android:statusBarColor">#0F1115</item>
+        <item name="android:navigationBarColor">#0F1115</item>
+        <item name="android:alertDialogTheme">@style/AppDialogDark</item>
+    </style>
+
+    <style name="AppDialog" parent="AppDialogModern" />
+    <style name="AppDialogModern" parent="android:Theme.Material.Light.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/dialog_surface</item>
+        <item name="android:textColorPrimary">#111827</item>
+        <item name="android:textColorSecondary">#6B7280</item>
+        <item name="android:colorAccent">#0A7D5A</item>
+        <item name="android:windowMinWidthMajor">65%</item>
+        <item name="android:windowMinWidthMinor">90%</item>
+        <item name="android:backgroundDimAmount">0.45</item>
+        <item name="android:windowElevation">0dp</item>
+        <item name="android:buttonBarButtonStyle">@style/DialogButton</item>
+    </style>
+
+    <style name="AppDialogDark" parent="AppDialogDarkModern" />
+    <style name="AppDialogDarkModern" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/dialog_surface_dark</item>
+        <item name="android:textColorPrimary">#F3F4F6</item>
+        <item name="android:textColorSecondary">#9CA3AF</item>
+        <item name="android:colorAccent">#34D399</item>
+        <item name="android:windowMinWidthMajor">65%</item>
+        <item name="android:windowMinWidthMinor">90%</item>
+        <item name="android:backgroundDimAmount">0.45</item>
+        <item name="android:windowElevation">0dp</item>
+        <item name="android:buttonBarButtonStyle">@style/DialogButtonDark</item>
+    </style>
+
+    <style name="DialogButton" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:background">@drawable/dialog_button</item>
+        <item name="android:textColor">#0A7D5A</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:minWidth">96dp</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+
+    <style name="DialogButtonDark" parent="DialogButton">
+        <item name="android:background">@drawable/dialog_button_dark</item>
+        <item name="android:textColor">#34D399</item>
+    </style>
+</resources>

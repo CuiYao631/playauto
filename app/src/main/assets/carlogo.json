@@ -1,0 +1,416 @@
+[
+    {
+        "brandID": 0,
+        "name":"Car",
+        "zh-CN":"默认",
+        "path":"CarLogo/default.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Alfa-Romeo",
+        "zh-CN":"阿尔法·罗密欧",
+        "path":"CarLogo/Alfa-Romeo.png"
+    },
+    {
+        "brandID": 1,
+        "name":"Audi",
+        "zh-CN":"奥迪",
+        "path":"CarLogo/Audi.png"
+    },
+    {
+        "brandID": 2,
+        "name":"BMW",
+        "zh-CN":"宝马",
+        "path":"CarLogo/BMW.png"
+    },
+    {
+        "brandID": 13,
+        "name":"Buick",
+        "zh-CN":"别克",
+        "path":"CarLogo/Buick.png"
+    },
+    {
+        "brandID": 0,
+        "name":"BYD",
+        "zh-CN":"比亚迪",
+        "path":"CarLogo/BYD.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Cadillac",
+        "zh-CN":"凯迪拉克",
+        "path":"CarLogo/Cadillac.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Changan",
+        "zh-CN":"长安",
+        "path":"CarLogo/Changan.png"
+    },
+    {
+        "brandID": 10,
+        "name":"Chevrolet",
+        "zh-CN":"雪佛兰",
+        "path":"CarLogo/Chevrolet.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Citroen",
+        "zh-CN":"雪铁龙",
+        "path":"CarLogo/Citroen.png"
+    },
+    {
+        "brandID": 0,
+        "name":"DS",
+        "zh-CN":"DS",
+        "path":"CarLogo/DS.png"
+    },
+    {
+        "brandID": 12,
+        "name":"Ford",
+        "zh-CN":"福特",
+        "path":"CarLogo/FORD.png"
+    },
+    {
+        "brandID": 8,
+        "name":"HONDA",
+        "zh-CN":"本田",
+        "path":"CarLogo/Honda.png"
+    },
+    {
+        "brandID": 11,
+        "name":"HYUNDAI",
+        "zh-CN":"现代",
+        "path":"CarLogo/HYUNDAI.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Jaguar",
+        "zh-CN":"捷豹",
+        "path":"CarLogo/Jaguar.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Kia",
+        "zh-CN":"起亚",
+        "path":"CarLogo/KIA.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Land-Rover",
+        "zh-CN":"路虎",
+        "path":"CarLogo/Land-Rover.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Lexus",
+        "zh-CN":"雷克萨斯",
+        "path":"CarLogo/Lexus.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Maserati",
+        "zh-CN":"玛莎拉蒂",
+        "path":"CarLogo/Maserati.png"
+    },
+    {
+        "brandID": 14,
+        "name":"Mazda",
+        "zh-CN":"马自达",
+        "path":"CarLogo/Mazda.png"
+    },
+    {
+        "brandID": 3,
+        "name":"Mercedes Benz",
+        "zh-CN":"奔驰",
+        "path":"CarLogo/Mercedes Benz.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Peugeot",
+        "zh-CN":"标志",
+        "path":"CarLogo/Peugeot.png"
+    },
+    {
+        "brandID": 5,
+        "name":"Porsche",
+        "zh-CN":"保时捷",
+        "path":"CarLogo/Porsche.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Skoda",
+        "zh-CN":"斯柯达",
+        "path":"CarLogo/Skoda.png"
+    },
+    {
+        "brandID": 0,
+        "name":"SUBARU",
+        "zh-CN":"斯巴鲁",
+        "path":"CarLogo/SUBARU.png"
+    },
+    {
+        "brandID": 7,
+        "name":"TOYOTA",
+        "zh-CN":"丰田",
+        "path":"CarLogo/TOYOTA.png"
+    },
+    {
+        "brandID": 6,
+        "name":"Volkswagen",
+        "zh-CN":"大众",
+        "path":"CarLogo/Volkswagen.png"
+    },
+    {
+        "brandID": 4,
+        "name":"Volvo",
+        "zh-CN":"沃尔沃",
+        "path":"CarLogo/volvo.png"
+    },
+    {
+        "brandID": 0,
+        "name":"BAOJUN",
+        "zh-CN":"宝骏",
+        "path":"CarLogo/BAOJUN.png"
+    },
+    {
+        "brandID": 0,
+        "name":"BAW-WEIWANG",
+        "zh-CN":"北汽威旺",
+        "path":"CarLogo/BAW-WEIWANG.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Bentley",
+        "zh-CN":"宾利",
+        "path":"CarLogo/Bentley.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Bugatti",
+        "zh-CN":"布加迪",
+        "path":"CarLogo/Bugatti.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Chery",
+        "zh-CN":"奇瑞",
+        "path":"CarLogo/Chery.png"
+    },
+    {
+        "brandID": 0,
+        "name":"CROWN",
+        "zh-CN":"皇冠",
+        "path":"CarLogo/CROWN.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Dodge",
+        "zh-CN":"道奇",
+        "path":"CarLogo/Dodge.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Dongfeng",
+        "zh-CN":"东风",
+        "path":"CarLogo/DONGFENG.png"
+    },
+    {
+        "brandID": 0,
+        "name":"EMGRAND",
+        "zh-CN":"帝豪",
+        "path":"CarLogo/EMGRAND.png"
+    },
+    {
+        "brandID": 0,
+        "name":"FAW",
+        "zh-CN":"一汽",
+        "path":"CarLogo/FAW.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Ferrari",
+        "zh-CN":"法拉利",
+        "path":"CarLogo/Ferrari.png"
+    },
+    {
+        "brandID": 0,
+        "name":"FIAT",
+        "zh-CN":"菲亚特",
+        "path":"CarLogo/FIAT.png"
+    },
+    {
+        "brandID": 0,
+        "name":"GAC",
+        "zh-CN":"广汽",
+        "path":"CarLogo/GAC.png"
+    },
+    {
+        "brandID": 0,
+        "name":"GEELY",
+        "zh-CN":"吉利",
+        "path":"CarLogo/GEELY.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Great-Wall",
+        "zh-CN":"长城",
+        "path":"CarLogo/Great-Wall.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Great-Wall",
+        "zh-CN":"长城炮",
+        "path":"CarLogo/Great-Wall-2.png"
+    },
+    {
+        "brandID": 0,
+        "name":"ORA",
+        "zh-CN":"欧拉",
+        "path":"CarLogo/ORA.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Haima",
+        "zh-CN":"海马",
+        "path":"CarLogo/Haima.png"
+    },
+    {
+        "brandID": 0,
+        "name":"HAVAL",
+        "zh-CN":"哈弗",
+        "path":"CarLogo/HAVAL.png"
+    },
+    {
+        "brandID": 0,
+        "name":"ISUZU",
+        "zh-CN":"庆铃",
+        "path":"CarLogo/ISUZU.png"
+    },
+    {
+        "brandID": 0,
+        "name":"JAC",
+        "zh-CN":"江淮",
+        "path":"CarLogo/JAC.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Jeep",
+        "zh-CN":"吉普",
+        "path":"CarLogo/Jeep.png"
+    },
+    {
+        "brandID": 0,
+        "name":"JMC",
+        "zh-CN":"江铃",
+        "path":"CarLogo/JMC.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Lamborghini",
+        "zh-CN":"兰博基尼",
+        "path":"CarLogo/Lamborghini.png"
+    },
+    {
+        "brandID": 0,
+        "name":"LINCOLN",
+        "zh-CN":"林肯",
+        "path":"CarLogo/LINCOLN.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Luxgen",
+        "zh-CN":"纳智捷",
+        "path":"CarLogo/Luxgen.png"
+    },
+	{
+        "brandID": 0,
+        "name":"LYNK&CO",
+        "zh-CN":"领克",
+        "path":"CarLogo/LYNK&CO.png"
+    },
+    {
+        "brandID": 0,
+        "name":"MG",
+        "zh-CN":"名爵",
+        "path":"CarLogo/MG.png"
+    },
+    {
+        "brandID": 0,
+        "name":"mini",
+        "zh-CN":"mini",
+        "path":"CarLogo/mini.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Mitsubishi",
+        "zh-CN":"三菱",
+        "path":"CarLogo/Mitsubishi.png"
+    },
+	{
+        "brandID": 0,
+        "name":"ROEWE",
+        "zh-CN":"荣威",
+        "path":"CarLogo/ROEWE.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Rolls-Royce",
+        "zh-CN":"劳斯莱斯",
+        "path":"CarLogo/Rolls-Royce.png"
+    },
+    {
+        "brandID": 0,
+        "name":"SGMW",
+        "zh-CN":"五菱",
+        "path":"CarLogo/SGMW.png"
+    },
+    {
+        "brandID": 0,
+        "name":"smart",
+        "zh-CN":"smart",
+        "path":"CarLogo/smart.png"
+    },
+    {
+        "brandID": 0,
+        "name":"SUZUKI",
+        "zh-CN":"铃木",
+        "path":"CarLogo/SUZUKI.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Venucia",
+        "zh-CN":"启辰",
+        "path":"CarLogo/Venucia.png"
+    },
+    {
+        "brandID": 0,
+        "name":"ZOTYE",
+        "zh-CN":"众泰",
+        "path":"CarLogo/ZOTYE.png"
+    },
+    {
+        "brandID": 0,
+        "name":"WEY",
+        "zh-CN":"魏派",
+        "path":"CarLogo/WEY.png"
+    },
+    {
+        "brandID": 0,
+        "name":"Infiniti",
+        "zh-CN":"英菲尼迪",
+        "path":"CarLogo/Infiniti.png"
+    },
+    {
+        "brandID": 9,
+        "name":"NISSAN",
+        "zh-CN":"日产",
+        "path":"CarLogo/NISSAN.png"
+    },
+    {
+        "brandID": 0,
+        "name":"addCustomLogo",
+        "zh-CN":"addCustomLogo",
+        "path":"CarLogo/addCustomLogo.png"
+    }
+]                                                  

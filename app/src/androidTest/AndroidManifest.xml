@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="cn.autoplay.replacement.tests">
+    <application android:label="AutoPlay connection tests" />
+    <instrumentation
+        android:name="cn.autoplay.replacement.ConnectionServiceInstrumentation"
+        android:targetPackage="cn.autoplay.replacement" />
+    <instrumentation
+        android:name="cn.autoplay.replacement.CompatibilityInstrumentation"
+        android:targetPackage="cn.autoplay.replacement" />
+</manifest>

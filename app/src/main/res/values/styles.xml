@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:Theme.Holo.Light.NoActionBar">
+        <item name="android:windowBackground">#F2F4F7</item>
+        <item name="android:alertDialogTheme">@style/AppDialog</item>
+    </style>
+    <style name="AppThemeDark" parent="android:Theme.Holo.NoActionBar">
+        <item name="android:windowBackground">#0F1115</item>
+        <item name="android:alertDialogTheme">@style/AppDialogDark</item>
+    </style>
+    <style name="AppDialog" parent="android:Theme.Holo.Light.Dialog">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@drawable/dialog_surface</item>
+        <item name="android:textColorPrimary">#111827</item>
+        <item name="android:textColorSecondary">#6B7280</item>
+        <item name="android:windowMinWidthMajor">65%</item>
+        <item name="android:windowMinWidthMinor">90%</item>
+        <item name="android:backgroundDimAmount">0.45</item>
+        <item name="android:buttonBarButtonStyle">@style/DialogButton</item>
+    </style>
+    <style name="AppDialogDark" parent="android:Theme.Holo.Dialog">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@drawable/dialog_surface_dark</item>
+        <item name="android:textColorPrimary">#F3F4F6</item>
+        <item name="android:textColorSecondary">#9CA3AF</item>
+        <item name="android:windowMinWidthMajor">65%</item>
+        <item name="android:windowMinWidthMinor">90%</item>
+        <item name="android:backgroundDimAmount">0.45</item>
+        <item name="android:buttonBarButtonStyle">@style/DialogButtonDark</item>
+    </style>
+    <style name="DialogButton" parent="android:Widget.Holo.Button.Borderless">
+        <item name="android:background">@drawable/dialog_button</item>
+        <item name="android:textColor">#0A7D5A</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:minWidth">96dp</item>
+    </style>
+    <style name="DialogButtonDark" parent="DialogButton">
+        <item name="android:background">@drawable/dialog_button_dark</item>
+        <item name="android:textColor">#34D399</item>
+    </style>
+</resources>

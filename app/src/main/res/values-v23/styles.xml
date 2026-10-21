@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="AppThemeModern">
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+    <style name="AppDialog" parent="AppDialogModern">
+        <item name="android:colorBackgroundFloating">#FFFFFF</item>
+    </style>
+    <style name="AppDialogDark" parent="AppDialogDarkModern">
+        <item name="android:colorBackgroundFloating">#1A1D23</item>
+    </style>
+</resources>

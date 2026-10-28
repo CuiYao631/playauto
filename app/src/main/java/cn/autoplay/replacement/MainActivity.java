@@ -50,6 +50,7 @@ public final class MainActivity extends Activity {
     private static final int PAGE_ENVIRONMENT = 2;
     private static final int PAGE_STEERING = 3;
     private static final int PAGE_ADVANCED = 4;
+    private static final int PAGE_NAVIGATION = 5;
     private static boolean advancedUnlocked;
     private int versionTapCount;
     private long lastVersionTapMs;
@@ -126,9 +127,23 @@ public final class MainActivity extends Activity {
     private ConnectionService connectionService;
     private boolean serviceBound;
     private boolean activityVisible;
+    private boolean hostPageRequested;
     private boolean requestingMicrophone;
+    private android.app.AlertDialog errorDialog;
     private final ConnectionService.Client connectionClient = new ConnectionService.Client() {
+        @Override public void onNavigationLogChanged() {
+            screens.updateNavigationLog();
+        }
+        @Override public void onHostUiRequested() {
+            hostPageRequested = true;
+            setProjectionMode(false);
+            videoRenderer.setVisibility(View.GONE);
+            showMain();
+            updateStage();
+        }
         @Override public void onConnectionState() {
+            showPendingError();
+            screens.updateNavigationLog();
             if (screens != null) screens.updateAdvancedStatus();
             ConnectionService service = connectionService;
             if (service == null) return;
@@ -140,6 +155,7 @@ public final class MainActivity extends Activity {
             connectionStatus.setText(service.boxStatus);
             phoneStatus.setText(service.phoneStatus);
             if (!phonePlugged) {
+                hostPageRequested = false;
                 videoStarted = false;
                 lastVideoWidth = lastVideoHeight = 0;
                 videoRenderer.setVisibility(View.GONE);
@@ -156,9 +172,9 @@ public final class MainActivity extends Activity {
             if (!videoStarted) {
                 videoStarted = true;
                 connectionStatus.setText("盒子：已收到 CarPlay 视频帧，正在解码");
-                setProjectionMode(true);
+                if (!hostPageRequested) setProjectionMode(true);
             }
-            videoRenderer.setVisibility(View.VISIBLE);
+            videoRenderer.setVisibility(hostPageRequested ? View.GONE : View.VISIBLE);
             videoRenderer.submitFrame(frame);
         }
 
@@ -182,6 +198,7 @@ public final class MainActivity extends Activity {
             protocolSession = null;
             phonePlugged = bluetoothLinked = wifiLinked = false;
             videoStarted = false;
+            hostPageRequested = false;
             videoRenderer.setVisibility(View.GONE);
             setProjectionMode(false);
             connectionStatus.setText("盒子：连接服务已中断，请重新打开应用");
@@ -199,7 +216,7 @@ public final class MainActivity extends Activity {
         touchEnabled = getPreferences(MODE_PRIVATE).getBoolean("touch_enabled", true);
         carLogoOptions = loadCarLogoOptions();
         selectedCarLogo = findCarLogo(getPreferences(MODE_PRIVATE)
-            .getString("CarPlayOEMIconPath", "CarLogo/default.png"));
+            .getString("CarPlayOEMIconPath", CarLogoUpload.DEFAULT_PATH));
         if (selectedCarLogo == null && !carLogoOptions.isEmpty()) {
             selectedCarLogo = carLogoOptions.get(0);
         }
@@ -233,6 +250,61 @@ public final class MainActivity extends Activity {
         AndroidCompat.registerReceiver(this, vendorKeyReceiver, vendorFilter, true);
         vendorKeysRegistered = true;
         if (connectionService != null) connectionService.setClientVisible(true);
+        showPendingError();
+    }
+
+    private void showPendingError() {
+        if (!activityVisible || isFinishing() || isDestroyed() || errorDialog != null) return;
+        String pending = ErrorLog.pending();
+        if (pending.isEmpty()) return;
+        showErrorDialog("运行错误", pending
+                + "\n\n完整记录可在设置 → 更多设置 → 错误日志查看。");
+        ErrorLog.acknowledge(pending);
+    }
+
+    void showErrorLog() {
+        if (errorDialog == null) showErrorDialog("错误日志", ErrorLog.history());
+    }
+
+    private void showErrorDialog(String title, String detail) {
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        TextView text = Ui.text(this, detail, 13, Ui.TEXT, false);
+        text.setTextIsSelectable(true);
+        int padding = Ui.dp(this, 16);
+        text.setPadding(padding, padding, padding, padding);
+        scroll.addView(text);
+        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
+                .setTitle(title).setView(scroll)
+                .setPositiveButton("关闭", null)
+                .setNeutralButton("复制", null)
+                .setNegativeButton("清空日志", null).create();
+        errorDialog = dialog;
+        dialog.setOnDismissListener(ignored -> {
+            errorDialog = null;
+            showPendingError();
+        });
+        dialog.setOnShowListener(ignored -> {
+            dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view -> {
+                android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
+                        getSystemService(CLIPBOARD_SERVICE);
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("PlayAuto 错误日志", text.getText()));
+                Toast.makeText(this, "日志已复制，请注意隐私", Toast.LENGTH_SHORT).show();
+            });
+            dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).setOnClickListener(view ->
+                    new android.app.AlertDialog.Builder(this).setTitle("清空错误日志")
+                            .setMessage("仅清空诊断日志，不影响应用设置。")
+                            .setNegativeButton("取消", null)
+                            .setPositiveButton("清空", (confirmation, which) -> {
+                                try {
+                                    ErrorLog.clear();
+                                    text.setText(ErrorLog.history());
+                                } catch (java.io.IOException exception) {
+                                    android.util.Log.e("AutoPlay", "Cannot clear error log", exception);
+                                    text.setText("清空失败：" + exception);
+                                }
+                            }).show());
+        });
+        dialog.show();
     }
 
     @Override
@@ -250,6 +322,11 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (errorDialog != null) {
+            errorDialog.setOnDismissListener(null);
+            errorDialog.dismiss();
+            errorDialog = null;
+        }
         if (testTone != null) {
             testTone.release();
             testTone = null;
@@ -409,6 +486,13 @@ public final class MainActivity extends Activity {
         stageCenter.setClipChildren(false);
         stageCenter.setClipToPadding(false);
         stageLogo = new Widgets.CarPlayLogo(this);
+        stageLogo.setContentDescription("CarPlay，点击返回投屏");
+        stageLogo.setOnClickListener(view -> {
+            if (!hostPageRequested || !phonePlugged) return;
+            hostPageRequested = false;
+            videoStarted = false;
+            if (protocolSession != null) protocolSession.requestKeyFrame();
+        });
         int logoSize = dp(landscape ? (compactLandscape ? 104 : 140) : 132);
         stageCenter.addView(stageLogo, new LinearLayout.LayoutParams(logoSize, logoSize));
         LinearLayout stageText = new LinearLayout(this);
@@ -528,7 +612,10 @@ public final class MainActivity extends Activity {
         String prompt;
         int dotColor = Ui.IDLE;
         boolean connecting = false;
-        if (box == Ui.STATE_ERROR) {
+        if (hostPageRequested && phonePlugged) {
+            prompt = "手机已连接，点击 Logo 返回投屏";
+            dotColor = Ui.ACCENT;
+        } else if (box == Ui.STATE_ERROR) {
             prompt = "设备连接失败，请重新插拔设备";
             dotColor = Ui.ERROR;
         } else if (box == Ui.STATE_IDLE) {
@@ -744,6 +831,23 @@ public final class MainActivity extends Activity {
         showSettingsPageOf(PAGE_STEERING);
     }
 
+    void showNavigationLog() {
+        showSettingsPageOf(PAGE_NAVIGATION);
+    }
+
+    String navigationLogText() {
+        return connectionService == null ? "连接服务尚未就绪，等待连接…"
+                : connectionService.navigationLogText();
+    }
+
+    void clearNavigationLog() {
+        if (connectionService == null) {
+            Toast.makeText(this, "连接服务尚未就绪", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        connectionService.clearNavigationLog();
+    }
+
     void showEnvironmentCheck() {
         if (Build.VERSION.SDK_INT >= 23 && !AndroidCompat.hasMicrophone(this)) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_ENV_MICROPHONE);
@@ -768,6 +872,8 @@ public final class MainActivity extends Activity {
             view = screens.advancedPage();
         } else if (page == PAGE_ENVIRONMENT) {
             view = screens.environmentPage();
+        } else if (page == PAGE_NAVIGATION) {
+            view = screens.navigationPage();
         } else if (page == PAGE_STEERING) {
             view = screens.steeringPage();
         } else {
@@ -1037,7 +1143,7 @@ public final class MainActivity extends Activity {
         int[] size = getRequestedVideoSize();
         if (connectionService != null) connectionService.updateVideoSettings(size[0], size[1]);
         onNavigationBarChanged();
-        selectedCarLogo = carLogoOptions.isEmpty() ? null : carLogoOptions.get(0);
+        selectedCarLogo = findCarLogo(CarLogoUpload.DEFAULT_PATH);
         refreshTheme();
     }
 

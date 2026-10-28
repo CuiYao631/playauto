@@ -13,6 +13,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 final class CarLogoUpload {
+    static final String DEFAULT_PATH = "CarLogo/Changan.png";
+
     private CarLogoUpload() { }
 
     static void send(Context context, BoxProtocolSession session, String path)

@@ -41,6 +41,8 @@ public final class ConnectionService extends Service {
     private static final int NOTIFICATION_ID = 1002;
 
     interface Client {
+        default void onNavigationLogChanged() { }
+        default void onHostUiRequested() { }
         void onConnectionState();
         void onVideoFrame(VideoFrame frame);
         void onMicrophonePermissionNeeded();
@@ -131,6 +133,7 @@ public final class ConnectionService extends Service {
         playback = createPlayback();
         capture = new AudioCapture(error -> handler.post(() -> {
             capturingDecodeType = -1;
+            ErrorLog.record("麦克风采集失败：" + error, null);
             setPhoneStatus("手机：麦克风采集失败：" + error);
         }));
         PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
@@ -148,8 +151,10 @@ public final class ConnectionService extends Service {
     @Override public IBinder onBind(Intent intent) { return binder; }
 
     private AudioPlayback createPlayback() {
-        return new AudioPlayback(error -> handler.post(
-                () -> setBoxStatus("盒子：音频播放失败：" + error)));
+        return new AudioPlayback(error -> handler.post(() -> {
+            ErrorLog.record("音频播放失败：" + error, null);
+            setBoxStatus("盒子：音频播放失败：" + error);
+        }));
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -269,6 +274,7 @@ public final class ConnectionService extends Service {
         if (connection != null) return;
         for (UsbDevice device : usbManager.getDeviceList().values()) {
             if (!isTarget(device)) continue;
+            ErrorLog.stage("检测到目标 USB，检查授权");
             if (usbManager.hasPermission(device)) {
                 openDevice(device);
             } else if (clientVisible && !device.getDeviceName().equals(permissionDeviceName)) {
@@ -284,6 +290,7 @@ public final class ConnectionService extends Service {
                                 | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0));
                 permissionDeviceName = device.getDeviceName();
                 try {
+                    ErrorLog.stage("向系统申请 USB 授权");
                     usbManager.requestPermission(device, permission);
                     usbPermissionDiagnostic = "已向系统申请 USB 授权，等待回调";
                     Log.i(TAG, usbPermissionDiagnostic + " device=" + device.getDeviceName()
@@ -294,6 +301,7 @@ public final class ConnectionService extends Service {
                     usbPermissionDiagnostic = "申请授权失败：" + exception.getClass().getSimpleName()
                             + "：" + exception.getMessage();
                     Log.e(TAG, usbPermissionDiagnostic, exception);
+                    ErrorLog.record(usbPermissionDiagnostic, exception);
                     setBoxStatus("盒子：" + usbPermissionDiagnostic);
                 }
             }
@@ -311,14 +319,17 @@ public final class ConnectionService extends Service {
             Log.w(TAG, legacyUsbPermissionDiagnostic);
             return;
         }
+        ErrorLog.stage("检查旧系统 USB 授权原生库");
         if (!BoxCore.isAvailable()) {
             legacyUsbPermissionDiagnostic = "旧系统授权不可用：libnx1 加载失败："
                     + BoxCore.getLoadError();
             Log.e(TAG, legacyUsbPermissionDiagnostic);
+            ErrorLog.record(legacyUsbPermissionDiagnostic, null);
             return;
         }
         try {
             // Match the original app, but trust the framework's permission state, not JNI's return.
+            ErrorLog.stage("调用旧系统 JNI USB 授权 BoxCore.stUsb");
             BoxCore.stUsb(device, usbManager);
             legacyUsbPermissionDiagnostic = usbManager.hasPermission(device)
                     ? "旧系统授权成功：系统已确认 USB 权限"
@@ -328,6 +339,7 @@ public final class ConnectionService extends Service {
             legacyUsbPermissionDiagnostic = "旧系统授权失败："
                     + exception.getClass().getSimpleName() + "：" + exception.getMessage();
             Log.e(TAG, legacyUsbPermissionDiagnostic, exception);
+            ErrorLog.record(legacyUsbPermissionDiagnostic, exception);
         }
     }
 
@@ -446,15 +458,18 @@ public final class ConnectionService extends Service {
     private void openDevice(UsbDevice device) {
         if (connection != null || !isTarget(device)) return;
         try {
+            ErrorLog.stage("打开 Android USB 设备");
             connection = UsbConnection.open(usbManager, device);
             deviceName = device.getDeviceName();
+            ErrorLog.stage("初始化连接音频");
             playback.close();
             playback = createPlayback();
             updateBackgroundPolicy();
             setBoxStatus("盒子：" + connection.name() + " 通道已建立");
             setPhoneStatus("手机：等待盒子状态");
             startProtocol();
-        } catch (IOException exception) {
+        } catch (IOException | SecurityException | IllegalArgumentException exception) {
+            ErrorLog.record("USB 连接初始化失败", exception);
             closeConnection();
             Log.e(TAG, "Cannot open USB device", exception);
             setBoxStatus("盒子：连接失败：" + exception.getMessage());
@@ -468,12 +483,22 @@ public final class ConnectionService extends Service {
     }
 
     private void startProtocol() {
+        ErrorLog.stage("初始化协议会话及盒子配置");
         int epoch = ++generation;
         AudioPlayback sessionPlayback = playback;
         session = new BoxProtocolSession(connection, width, height,
                 VideoPreferences.frameRate(prefs()), new BoxProtocolSession.Listener() {
             @Override public void onStatus(String status) {
                 dispatch(epoch, () -> setBoxStatus("盒子：" + status));
+            }
+            @Override public void onError(String message, Throwable error) {
+                dispatch(epoch, () -> {
+                    ErrorLog.record(message, error);
+                    notifyClient();
+                });
+            }
+            @Override public void onControlDiagnostic(String message) {
+                if (generation == epoch) ErrorLog.diagnostic(message);
             }
             @Override public void onPhoneStatus(String status) {
                 dispatch(epoch, () -> setPhoneStatus("手机：" + status));
@@ -517,6 +542,18 @@ public final class ConnectionService extends Service {
             @Override public void onBoxVersion(String version) {
                 dispatch(epoch, () -> { boxVersion = version; notifyClient(); });
             }
+            @Override public void onNavigationData(String data) {
+                dispatch(epoch, () -> recordNavigationData(data));
+            }
+            @Override public void onHostUiRequested() {
+                dispatch(epoch, () -> {
+                    if (client != null && clientVisible) {
+                        client.onHostUiRequested();
+                    } else {
+                        Log.w(TAG, "CarPlay host UI request ignored: no visible Activity");
+                    }
+                });
+            }
             @Override public void onSessionEnded() {
                 dispatch(epoch, () -> {
                     String failure = boxStatus;
@@ -528,6 +565,7 @@ public final class ConnectionService extends Service {
         });
         refreshSettings();
         session.start();
+        ErrorLog.stage("协议线程已启动，准备汽车图标");
         syncCarLogo();
         notifyClient();
     }
@@ -535,12 +573,13 @@ public final class ConnectionService extends Service {
     void syncCarLogo() {
         BoxProtocolSession current = session;
         if (current == null) return;
-        String path = prefs().getString("CarPlayOEMIconPath", "CarLogo/default.png");
+        String path = prefs().getString("CarPlayOEMIconPath", CarLogoUpload.DEFAULT_PATH);
         new Thread(() -> {
             try {
                 CarLogoUpload.send(this, current, path);
             } catch (IOException | org.json.JSONException exception) {
                 Log.e(TAG, "Cannot upload car logo", exception);
+                ErrorLog.record("读取或上传汽车图标失败", exception);
                 handler.post(() -> {
                     if (session == current) setBoxStatus("盒子：读取汽车图标失败：" + exception.getMessage());
                 });
@@ -616,7 +655,7 @@ public final class ConnectionService extends Service {
 
     boolean sendMediaCommand(int command) {
         BoxProtocolSession current = session;
-        return current != null && current.sendMediaCommand(command);
+        return current != null && current.sendMediaCommand(SteeringProtocol.playbackAction(prefs(), command));
     }
 
     private int lastSteeringCommand = -1;
@@ -631,7 +670,10 @@ public final class ConnectionService extends Service {
             Log.i("AutoPlayKeys", "Duplicate steering event suppressed: " + source);
             return true;
         }
-        if (!sendMediaCommand(command)) {
+        int action = SteeringProtocol.vendorEnabled(prefs()) ? canonical : command;
+        ErrorLog.diagnostic("方控来源=" + source + "，原始动作=" + command
+                + "，分发动作=" + action + "，长安协议=" + SteeringProtocol.vendorEnabled(prefs()));
+        if (!sendMediaCommand(action)) {
             Log.w("AutoPlayKeys", "Steering command rejected: " + source + " action=" + command);
             return false;
         }
@@ -671,6 +713,31 @@ public final class ConnectionService extends Service {
     private void setPhoneStatus(String status) {
         phoneStatus = status;
         notifyClient();
+    }
+
+    private final java.util.ArrayDeque<String> navigationLog = new java.util.ArrayDeque<>();
+
+    String navigationLogText() {
+        if (navigationLog.isEmpty()) return "等待盒子上报导航数据（命令 42 / 子类型 200）…";
+        StringBuilder text = new StringBuilder();
+        for (String entry : navigationLog) {
+            if (text.length() > 0) text.append("\n\n");
+            text.append(entry);
+        }
+        return text.toString();
+    }
+
+    void clearNavigationLog() {
+        navigationLog.clear();
+        if (client != null) client.onNavigationLogChanged();
+    }
+
+    private void recordNavigationData(String data) {
+        String time = new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.ROOT)
+                .format(new java.util.Date());
+        navigationLog.addFirst(time + "\n" + data);
+        while (navigationLog.size() > 50) navigationLog.removeLast();
+        if (client != null) client.onNavigationLogChanged();
     }
 
     private void notifyClient() {

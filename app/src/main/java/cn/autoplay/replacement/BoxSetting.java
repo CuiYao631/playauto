@@ -66,6 +66,10 @@ final class BoxSetting {
         return carPlay(fiveGhz ? 25 : 24);
     }
 
+    static BoxSetting dashboardInfo() {
+        return new BoxSetting(25, "{\"DashboardInfo\":7}".getBytes(StandardCharsets.UTF_8));
+    }
+
     static BoxSetting audioTransfer(boolean enabled) {
         return carPlay(enabled ? 22 : 23);
     }

@@ -27,6 +27,11 @@ final class SteeringProtocol {
         return prefs.getInt(PREFERENCE, 0) == 1;
     }
 
+    static int playbackAction(SharedPreferences prefs, int action) {
+        if (!vendorEnabled(prefs)) return action;
+        return action == 10001 ? 10004 : action == 10002 ? 10005 : action;
+    }
+
     static String androidPrefix(SharedPreferences prefs) {
         return vendorEnabled(prefs) ? "steering_cs35plus_key_" : "steering_key_";
     }

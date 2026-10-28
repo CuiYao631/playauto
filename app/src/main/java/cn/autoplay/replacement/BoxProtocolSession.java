@@ -42,6 +42,10 @@ public final class BoxProtocolSession implements AutoCloseable {
     private static final long AUTO_CONNECT_DELAY_MS = 2000L;
 
     public interface Listener {
+        default void onControlDiagnostic(String message) { }
+        default void onError(String message, Throwable error) { }
+        default void onNavigationData(String data) { }
+        default void onHostUiRequested() { }
         void onStatus(String status);
 
         void onPhoneStatus(String status);
@@ -231,14 +235,17 @@ public final class BoxProtocolSession implements AutoCloseable {
         android.util.Log.i("AutoPlayKeys", "command_queued button="
                 + SettingsScreens.steeringActionName(command) + " callState=" + callState
                 + " wireCommands=" + java.util.Arrays.toString(commands));
+        controlDiagnostic("方控动作=" + command + "，电话状态=" + callState
+                + "，排队命令=" + java.util.Arrays.toString(commands));
         for (int value : commands) sendCarPlayCommand(value);
         return true;
     }
 
     // Local action IDs never go on the wire. Audio controls 14/4/5 report incoming/active/ended calls.
     static int[] steeringCommands(int action, int callState) {
-        if (action == 10001) return callState == 2 ? new int[]{300}
-                : callState == 1 ? new int[0] : new int[]{205};
+        if (action == 10004) return callState != 0 ? new int[]{301} : new int[]{205};
+        if (action == 10005) return callState != 0 ? new int[]{300} : new int[]{204};
+        if (action == 10001) return callState != 0 ? new int[]{300} : new int[]{205};
         if (action == 10002) return callState != 0 ? new int[]{301} : new int[]{204};
         if (action == 10003) return new int[]{5, 6};
         if (action == 106 || action >= 200 && action <= 205) return new int[]{action};
@@ -246,6 +253,10 @@ public final class BoxProtocolSession implements AutoCloseable {
     }
 
     private volatile int callState;
+
+    private void controlDiagnostic(String message) {
+        if (listener != null) listener.onControlDiagnostic(message);
+    }
 
     private void sendMicSource() {
         int source = micSourceSetting;
@@ -264,7 +275,13 @@ public final class BoxProtocolSession implements AutoCloseable {
 
     private void sendCarPlayCommand(int value) {
         byte[] payload = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(value).array();
-        runOnControlExecutor(() -> writeFrame(ProtocolFrame.encode(CMD_CARPLAY, payload, cryptEnabled, nonce)));
+        runOnControlExecutor(() -> {
+            writeFrame(ProtocolFrame.encode(CMD_CARPLAY, payload, cryptEnabled, nonce));
+            if (value == 300 || value == 301) {
+                controlDiagnostic("已写入 USB：CMD 8 / " + value
+                        + "（不代表手机已执行）");
+            }
+        });
     }
 
     private interface IoTask {
@@ -278,6 +295,7 @@ public final class BoxProtocolSession implements AutoCloseable {
                     task.run();
                 } catch (IOException exception) {
                     if (!closed) {
+                        if (listener != null) listener.onError("设置或控制命令发送失败", exception);
                         publish("设置或控制命令发送失败：" + exception.getMessage());
                     }
                 }
@@ -422,6 +440,8 @@ public final class BoxProtocolSession implements AutoCloseable {
                     callState = 0;
                     wifiConnected = false;
                     publishLinkState();
+                } else if (packet.command == 42) {
+                    handleDashboardData(packet.payload);
                 } else if (packet.command == CMD_CARPLAY) {
                     handleCarPlayStatus(packet.payload);
                 } else if (packet.command == CMD_BLUETOOTH_PAIR_LIST) {
@@ -439,10 +459,12 @@ public final class BoxProtocolSession implements AutoCloseable {
             }
         } catch (IOException | RuntimeException exception) {
             if (!closed) {
+                if (listener != null) listener.onError("协议通信失败", exception);
                 publish("协议通信失败：" + exception.getMessage());
             }
         } catch (LinkageError error) {
             if (!closed) {
+                if (listener != null) listener.onError("原生加密桥调用失败", error);
                 publish("native 加密桥调用失败：" + error.getClass().getSimpleName());
             }
         } finally {
@@ -607,12 +629,21 @@ public final class BoxProtocolSession implements AutoCloseable {
         ByteBuffer header = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
         int decodeType = header.getInt(0);
         int audioType = header.getInt(8);
-        if (payload.length == AudioFrame.HEADER_SIZE + 1
-                || payload.length == AudioFrame.HEADER_SIZE + 4) {
+        if (payload.length == AudioFrame.HEADER_SIZE + 4) {
+            // The original protocol uses a float volume transition, not a control byte.
+            return;
+        }
+        if (payload.length == AudioFrame.HEADER_SIZE + 1) {
             int control = payload[AudioFrame.HEADER_SIZE] & 0xFF;
             if (control == 14) callState = 2;
             else if (control == 4) callState = 1;
             else if (control == 5) callState = 0;
+            if (control == 14 || control == 4 || control == 5) {
+                android.util.Log.i("AutoPlayKeys", "phone_audio_control=" + control
+                        + " callState=" + callState);
+                controlDiagnostic("电话音频控制=" + control + "，电话状态=" + callState
+                        + "，音频类型=" + audioType + "，解码类型=" + decodeType);
+            }
             if (control == 2 && listener != null) {
                 listener.onAudioStreamStopped(decodeType, audioType);
             } else if (control == 3) {
@@ -676,6 +707,31 @@ public final class BoxProtocolSession implements AutoCloseable {
         publishLinkState();
     }
 
+    private void handleDashboardData(byte[] payload) {
+        if (payload.length < 4) {
+            android.util.Log.e("AutoPlayNavigation", "Dashboard packet shorter than subtype header");
+            if (listener != null) listener.onNavigationData("数据错误：命令 42 缺少子类型头");
+            return;
+        }
+        int subtype = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt();
+        if (subtype != 200) return;
+        int end = payload.length;
+        while (end > 4 && payload[end - 1] == 0) end--;
+        if (end - 4 > 16384) {
+            android.util.Log.e("AutoPlayNavigation", "Navigation payload exceeds 16 KiB");
+            if (listener != null) listener.onNavigationData("数据错误：导航 JSON 超过 16 KiB，未保存");
+            return;
+        }
+        String data = new String(payload, 4, end - 4, java.nio.charset.StandardCharsets.UTF_8);
+        try {
+            new org.json.JSONObject(data);
+        } catch (org.json.JSONException exception) {
+            android.util.Log.e("AutoPlayNavigation", "Invalid navigation JSON", exception);
+            data = "JSON 解析失败：" + exception.getMessage() + "\n原始数据：" + data;
+        }
+        if (listener != null) listener.onNavigationData("CMD 42 / 200\n" + data);
+    }
+
     private void handleCarPlayStatus(byte[] payload) throws IOException {
         if (payload.length < 4) {
             throw new IOException("Invalid CarPlay command payload length: " + payload.length);
@@ -693,6 +749,13 @@ public final class BoxProtocolSession implements AutoCloseable {
             if (listener != null) {
                 listener.onMicrophoneStop();
             }
+        } else if (subcommand == 3) {
+            android.util.Log.i("AutoPlay", "CarPlay_RequestHostUI");
+            if (listener != null) listener.onHostUiRequested();
+        } else if (subcommand == 506 || subcommand == 507) {
+            if (listener != null) listener.onNavigationData("CMD 8 / " + subcommand
+                    + (subcommand == 506 ? "：盒子通知导航开始" : "：盒子通知导航结束")
+                    + "（独立状态消息，不是导航 JSON）");
         } else if (subcommand == 1001) {
             boxSupportsAutoConnect = true;
             publish("车机盒支持自动连接");

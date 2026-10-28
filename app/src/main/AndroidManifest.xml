@@ -17,7 +17,13 @@
     <uses-permission android:name="android.permission.MANAGE_USB"
         tools:ignore="ProtectedPermissions" />
 
+    <queries>
+        <package android:name="com.car.cs75_voice" />
+        <package android:name="com.iflytek.cutefly.speechclient" />
+    </queries>
+
     <application
+        android:name=".ErrorLog"
         android:allowBackup="false"
         android:icon="@mipmap/playauto_launcher"
         android:roundIcon="@mipmap/playauto_launcher"

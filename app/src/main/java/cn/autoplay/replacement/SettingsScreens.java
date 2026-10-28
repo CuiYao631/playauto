@@ -1,6 +1,7 @@
 package cn.autoplay.replacement;
 
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
@@ -48,6 +49,7 @@ final class SettingsScreens {
     private TextView steeringHint;
     private TextView overlayPermissionStatus;
     private TextView steeringLog;
+    private TextView navigationLog;
     private final java.util.ArrayDeque<String> steeringLogLines = new java.util.ArrayDeque<>();
     private final TextView[] steeringBindings = new TextView[STEERING_COMMANDS.length];
     private ImageView carLogoPreview;
@@ -55,6 +57,7 @@ final class SettingsScreens {
     private Widgets.LinkIcon wifiStatusIcon;
     private TextView advancedRootStatus;
     private TextView advancedUsbStatus;
+    private final java.util.ArrayList<Runnable> voiceStatusRefreshers = new java.util.ArrayList<>();
 
     SettingsScreens(MainActivity host) {
         this.host = host;
@@ -173,6 +176,9 @@ final class SettingsScreens {
         segmentedRow("Dock栏位置", new String[]{"默认", "底部", "驾驶侧"},
                 "dock_position", 0, host::onBoxSettingsChanged);
 
+        section("诊断");
+        navigationRow("错误日志", host::showErrorLog);
+
         if (host.advancedFeaturesUnlocked()) {
             section("高级功能");
             navigationRow("高级功能", host::showAdvanced);
@@ -205,6 +211,13 @@ final class SettingsScreens {
                 & (android.content.pm.ApplicationInfo.FLAG_SYSTEM
                 | android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0 ? "是" : "否");
         navigationRow("连接详情", host::showConnectionDetails);
+        section("禁用原车语音");
+        vehicleVoiceRow("禁用语音按键唤醒", VehicleVoiceControl.KEY_PACKAGE,
+                "禁用后，原车语音按键广播不再通过此应用拉起语音助理。"
+                        + "不会自动将语音按键绑定到 PlayAuto；语音助理的唤醒词可能仍可使用。");
+        vehicleVoiceRow("禁用原车语音助理", VehicleVoiceControl.ASSISTANT_PACKAGE,
+                "禁用后，原车语音助理及其唤醒引擎不可用，语音按键和唤醒词均无法使用该助理。"
+                        + "其他原车语音功能也可能受到影响。");
         section("USB 权限状态");
         LinearLayout usbCard = Ui.card(host);
         advancedUsbStatus = Ui.text(host, "", 13, Ui.TEXT_SECONDARY, false);
@@ -220,9 +233,167 @@ final class SettingsScreens {
         return page;
     }
 
+    private void vehicleVoiceRow(String label, String packageName, String warning) {
+        LinearLayout row = baseRow(true);
+        row.addView(title(label), grow());
+        Switch toggle = new Switch(host);
+        toggle.setContentDescription(label);
+        row.addView(toggle);
+        Runnable refresh = () -> {
+            try {
+                android.content.pm.ApplicationInfo application = VehicleVoiceControl.application(host, packageName);
+                toggle.setChecked(!application.enabled);
+                toggle.setEnabled(true);
+                row.setEnabled(true);
+            } catch (android.content.pm.PackageManager.NameNotFoundException exception) {
+                toggle.setChecked(false);
+                toggle.setEnabled(false);
+                row.setEnabled(false);
+                toggle.setText("未安装");
+                android.util.Log.i("AutoPlayVoice", "Vehicle voice package not installed: " + packageName);
+            }
+        };
+        voiceStatusRefreshers.add(refresh);
+        refresh.run();
+        View.OnClickListener change = view -> {
+            boolean disable;
+            try {
+                disable = VehicleVoiceControl.application(host, packageName).enabled;
+                toggle.setChecked(!disable);
+            } catch (android.content.pm.PackageManager.NameNotFoundException exception) {
+                refresh.run();
+                android.widget.Toast.makeText(host, "应用未安装：" + packageName,
+                        android.widget.Toast.LENGTH_LONG).show();
+                return;
+            }
+            new AlertDialog.Builder(host)
+                    .setTitle(disable ? label : "恢复原车语音应用")
+                    .setMessage((disable ? warning : "将重新启用此应用，恢复其运行资格。"
+                            + "若另一个语音组件仍被禁用，完整语音功能可能仍不可用。")
+                            + "\n\n" + packageName + "\n\n需要 Root，不卸载应用、不清除数据。"
+                            + "禁用状态由系统保存，退出 PlayAuto 或恢复默认设置不会自动恢复。"
+                            + "关闭此开关可重新启用，部分车机可能需要重启。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton(disable ? "确认禁用" : "确认恢复", (dialog, which) -> {
+                        AlertDialog progress = new AlertDialog.Builder(host)
+                                .setTitle("正在修改原车语音状态")
+                                .setMessage("请允许 Root 请求，最多等待 30 秒。")
+                                .setCancelable(false).show();
+                        VehicleVoiceControl.change(host, packageName, disable, result -> {
+                            android.util.Log.i("AutoPlayVoice", result);
+                            if (progress.isShowing()) progress.dismiss();
+                            if (host.isFinishing() || host.isDestroyed()) return;
+                            refresh.run();
+                            new AlertDialog.Builder(host).setTitle("原车语音操作结果")
+                                    .setMessage(result).setPositiveButton("知道了", null).show();
+                        });
+                    }).show();
+        };
+        toggle.setOnClickListener(change);
+        row.setOnClickListener(change);
+        addRow(row);
+    }
+
     void updateAdvancedStatus() {
         if (advancedRootStatus != null) advancedRootStatus.setText(RootUsbAuthorization.rootStatus());
         if (advancedUsbStatus != null) advancedUsbStatus.setText(host.advancedUsbStatus());
+        for (Runnable refresh : voiceStatusRefreshers) refresh.run();
+    }
+
+    View navigationPage() {
+        LinearLayout page = newPage("仪表导航（开发中）", "清空日志",
+                host::clearNavigationLog, host::showSettings);
+        TextView help = Ui.text(host, "接收并记录盒子上报的导航 JSON，不自动向原车仪表发送广播。"
+                + "请连接手机并开始导航；是否上报取决于盒子固件和导航应用。"
+                + "连接时发送原版 DashboardInfo=7 配置，日志同时显示配置发送结果和导航开始/结束消息；"
+                + "配置已发送不代表盒子已确认。更新后请拔插盒子并重新连接手机。"
+                + "保留最近 50 条，最新在前，服务销毁后清空。"
+                + "数据可能包含道路名、目的地等位置隐私，请谨慎分享。",
+                13, Ui.TEXT_SECONDARY, false);
+        help.setPadding(dp(8), dp(16), dp(8), dp(12));
+        list.addView(help);
+        navigationLog = Ui.text(host, "", 13, Ui.TEXT, false);
+        navigationLog.setTypeface(android.graphics.Typeface.MONOSPACE);
+        navigationLog.setTextIsSelectable(true);
+        navigationLog.setPadding(dp(12), dp(12), dp(12), dp(12));
+        ScrollView logScroll = new ScrollView(host);
+        logScroll.addView(navigationLog);
+        list.addView(logScroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(240)));
+        updateNavigationLog();
+        section("仪表手动测试");
+        TextView warning = Ui.text(host, "仅在车辆停稳时测试。转向测试距离固定为 100 米；"
+                + "点击并确认后仅发送一次，不需要连接盒子。"
+                + "CarPlay 导航激活会停止原厂高德导航，结束导航会发送仪表导航停止广播。"
+                + "广播提交不代表仪表已接收，实际兼容性请观察仪表。",
+                13, Ui.TEXT_SECONDARY, false);
+        warning.setPadding(dp(8), dp(12), dp(8), dp(12));
+        list.addView(warning);
+        TextView testStatus = Ui.text(host, "尚未发送测试广播", 13, Ui.TEXT_SECONDARY, false);
+        testStatus.setTextIsSelectable(true);
+        testStatus.setPadding(dp(8), dp(8), dp(8), dp(12));
+        String[] labels = {"左转", "右转", "直行", "左掉头", "到达目的地", "结束导航",
+                "CarPlay 导航激活"};
+        int[] iconIds = {27, 22, 17, 25, 6, -1, -1};
+        LinearLayout buttons = null;
+        for (int i = 0; i < labels.length; i++) {
+            if (i % 2 == 0) {
+                buttons = new LinearLayout(host);
+                buttons.setOrientation(LinearLayout.HORIZONTAL);
+                list.addView(buttons);
+            }
+            final String label = labels[i];
+            final int iconId = iconIds[i];
+            final String action = i == 5 ? "com.autonavi.navigation.NAVIGATION_STOPPED"
+                    : i == 6 ? "carplay_navigation_activated"
+                    : "com.autonavi.navigation.NAVIGATION_UPDATES";
+            Button button = Ui.button(host, label, false);
+            button.setMinimumHeight(dp(48));
+            button.setOnClickListener(view -> confirmNavigationTest(label, action, iconId, testStatus));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+            params.setMargins(dp(4), dp(4), dp(4), dp(4));
+            buttons.addView(button, params);
+        }
+        list.addView(testStatus);
+        return page;
+    }
+
+    private void confirmNavigationTest(String label, String action, int iconId, TextView status) {
+        String details = action + (iconId >= 0
+                ? "\nnavigation_id=" + iconId + "\nnavigation_dis=100,m" : "");
+        new AlertDialog.Builder(host).setTitle("仪表测试：" + label)
+                .setMessage("请确认车辆已停稳。"
+                        + ("carplay_navigation_activated".equals(action)
+                        ? "\n此操作会停止原厂高德当前导航。" : "")
+                        + "\n\n将发送一次广播：\n" + details)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("发送", (dialog, which) -> {
+                    Intent intent = new Intent(action);
+                    if (iconId >= 0) {
+                        intent.putExtra("navigation_id", iconId);
+                        intent.putExtra("navigation_dis", "100,m");
+                    }
+                    try {
+                        host.sendBroadcast(intent);
+                        String time = new java.text.SimpleDateFormat(
+                                "HH:mm:ss.SSS", java.util.Locale.ROOT).format(new java.util.Date());
+                        status.setText(time + " 已提交：" + label + "\n" + details
+                                + "\n无法确认仪表是否接收，请观察仪表。");
+                        status.setTextColor(Ui.TEXT_SECONDARY);
+                        android.util.Log.i("AutoPlayNavigation", "Manual test broadcast: " + details);
+                    } catch (SecurityException exception) {
+                        android.util.Log.e("AutoPlayNavigation", "Manual test broadcast denied", exception);
+                        status.setText("发送失败：" + exception);
+                        status.setTextColor(Ui.WARNING);
+                        new AlertDialog.Builder(host).setTitle("测试广播发送失败")
+                                .setMessage(exception.toString()).setPositiveButton("知道了", null).show();
+                    }
+                }).show();
+    }
+
+    void updateNavigationLog() {
+        if (navigationLog != null) navigationLog.setText(host.navigationLogText());
     }
 
     View environmentPage() {
@@ -274,10 +445,12 @@ final class SettingsScreens {
 
     private LinearLayout newPage(String title, String rightText, Runnable rightAction, Runnable back,
             boolean showConnectionIcons) {
+        voiceStatusRefreshers.clear();
         overlayPermissionStatus = null;
         cancelSteeringLearning();
         steeringHint = null;
         steeringLog = null;
+        navigationLog = null;
         java.util.Arrays.fill(steeringBindings, null);
         bluetoothStatusIcon = wifiStatusIcon = null;
         bluetoothStatusIcon = wifiStatusIcon = null;
@@ -544,6 +717,11 @@ final class SettingsScreens {
 
     View steeringPage() {
         SteeringProtocol.migrate(prefs());
+        String[] steeringLabels = STEERING_LABELS.clone();
+        if (SteeringProtocol.vendorEnabled(prefs())) {
+            steeringLabels[0] = "上一曲 / 挂断";
+            steeringLabels[1] = "下一曲 / 接听";
+        }
         LinearLayout page = newPage("方控学习", "取消学习", this::cancelSteeringLearning, host::showSettings);
         section("协议");
         choiceRow("方控协议", SteeringProtocol.PREFERENCE, SteeringProtocol.LABELS, 0,
@@ -579,7 +757,7 @@ final class SettingsScreens {
             LinearLayout labels = new LinearLayout(host);
             labels.setOrientation(LinearLayout.VERTICAL);
             labels.setGravity(Gravity.CENTER);
-            TextView label = Ui.text(host, STEERING_LABELS[i], 16, Ui.TEXT, true);
+            TextView label = Ui.text(host, steeringLabels[i], 16, Ui.TEXT, true);
             label.setGravity(Gravity.CENTER);
             labels.addView(label);
             steeringBindings[i] = Ui.text(host, "", 13, Ui.TEXT_SECONDARY, false);
@@ -587,14 +765,14 @@ final class SettingsScreens {
             steeringBindings[i].setPadding(0, dp(6), 0, 0);
             labels.addView(steeringBindings[i]);
             row.addView(labels);
-            row.setContentDescription("学习" + STEERING_LABELS[i]);
+            row.setContentDescription("学习" + steeringLabels[i]);
             row.setOnClickListener(view -> {
                 learningCommand = STEERING_COMMANDS[index];
                 learningKey = KeyEvent.KEYCODE_UNKNOWN;
                 learningVendor = null;
-                android.util.Log.i("AutoPlayKeys", "learn_start button=" + STEERING_LABELS[index]
+                android.util.Log.i("AutoPlayKeys", "learn_start button=" + steeringLabels[index]
                         + " action=" + learningCommand);
-                steeringHint.setText("正在学习「" + STEERING_LABELS[index] + "」，请按下并松开方控按键");
+                steeringHint.setText("正在学习「" + steeringLabels[index] + "」，请按下并松开方控按键");
                 steeringHint.setTextColor(Ui.ACCENT);
             });
             LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(
@@ -659,7 +837,7 @@ final class SettingsScreens {
 
     void cancelSteeringLearning() {
         if (learningCommand >= 0) {
-            android.util.Log.i("AutoPlayKeys", "learn_end button=" + steeringActionName(learningCommand));
+            android.util.Log.i("AutoPlayKeys", "learn_end button=" + selectedSteeringActionName(learningCommand));
         }
         learningCommand = -1;
         learningKey = KeyEvent.KEYCODE_UNKNOWN;
@@ -686,7 +864,7 @@ final class SettingsScreens {
             }
 
             prefs().edit().putInt(SteeringProtocol.androidPrefix(prefs()) + code, learningCommand).apply();
-            android.util.Log.i("AutoPlayKeys", "learn_bound button=" + steeringActionName(learningCommand)
+            android.util.Log.i("AutoPlayKeys", "learn_bound button=" + selectedSteeringActionName(learningCommand)
                     + " key=" + KeyEvent.keyCodeToString(code) + " keyCode=" + code
                     + " scanCode=" + event.getScanCode());
             cancelSteeringLearning();
@@ -714,7 +892,13 @@ final class SettingsScreens {
         return true;
     }
 
+    private String selectedSteeringActionName(int action) {
+        return steeringActionName(SteeringProtocol.playbackAction(prefs(), action));
+    }
+
     static String steeringActionName(int action) {
+        if (action == 10004) return "上一曲 / 挂断";
+        if (action == 10005) return "下一曲 / 接听";
         for (int i = 0; i < STEERING_COMMANDS.length; i++) {
             if (STEERING_COMMANDS[i] == action) return STEERING_LABELS[i];
         }
@@ -732,7 +916,7 @@ final class SettingsScreens {
                 + " key=" + KeyEvent.keyCodeToString(event.getKeyCode())
                 + " keyCode=" + event.getKeyCode() + " scanCode=" + event.getScanCode()
                 + " repeat=" + event.getRepeatCount() + " deviceId=" + event.getDeviceId()
-                + " button=" + steeringActionName(action));
+                + " action=" + action);
     }
 
     void recordSteeringKey(KeyEvent event, int action) {
@@ -743,8 +927,8 @@ final class SettingsScreens {
                 + KeyEvent.keyCodeToString(event.getKeyCode())
                 + "\n键码=" + event.getKeyCode() + " 扫描码=" + event.getScanCode()
                 + " 重复=" + event.getRepeatCount() + " 设备=" + event.getDeviceId()
-                + "\n功能：" + steeringActionName(action)
-                + (learningCommand >= 0 ? " | 正在学习：" + steeringActionName(learningCommand) : ""));
+                + "\n功能：" + selectedSteeringActionName(action)
+                + (learningCommand >= 0 ? " | 正在学习：" + selectedSteeringActionName(learningCommand) : ""));
     }
 
     void recordVendorKey(String code, String state, boolean ordered, boolean noAbort) {
@@ -761,7 +945,7 @@ final class SettingsScreens {
                         : noAbort ? "发送方禁止中止，不能依靠 abortBroadcast 拦截"
                         : "可进一步测试中止后续接收；不保证最先收到或阻止系统动作")
                 + "\n当前行为：仅检测，不拦截"
-                + "\n功能：" + steeringActionName(action));
+                + "\n功能：" + selectedSteeringActionName(action));
     }
 
     private String vendorLogValue(String value) {

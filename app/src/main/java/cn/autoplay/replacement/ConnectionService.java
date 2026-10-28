@@ -78,6 +78,8 @@ public final class ConnectionService extends Service {
     String boxStatus = "盒子：未连接";
     String phoneStatus = "手机：未连接";
     String boxVersion;
+    String boxBluetoothName;
+    String boxWifiName;
     boolean phonePlugged;
     boolean bluetoothLinked;
     boolean wifiLinked;
@@ -488,6 +490,13 @@ public final class ConnectionService extends Service {
         AudioPlayback sessionPlayback = playback;
         session = new BoxProtocolSession(connection, width, height,
                 VideoPreferences.frameRate(prefs()), new BoxProtocolSession.Listener() {
+            @Override public void onBoxName(boolean bluetooth, String name) {
+                dispatch(epoch, () -> {
+                    if (bluetooth) boxBluetoothName = name;
+                    else boxWifiName = name;
+                    notifyClient();
+                });
+            }
             @Override public void onStatus(String status) {
                 dispatch(epoch, () -> setBoxStatus("盒子：" + status));
             }
@@ -528,10 +537,14 @@ public final class ConnectionService extends Service {
             }
             @Override public void onLinkState(boolean plugged, boolean bluetooth, boolean wifi) {
                 dispatch(epoch, () -> {
+                    if (plugged && !phonePlugged) {
+                        clearNavigationState("手机已连接，等待盒子上报导航数据");
+                    }
                     phonePlugged = plugged;
                     bluetoothLinked = bluetooth;
                     wifiLinked = wifi;
                     if (!plugged) {
+                        clearNavigationState("手机未连接，等待导航数据");
                         microphoneDecodeType = -1;
                         capturingDecodeType = -1;
                         capture.stop();
@@ -544,6 +557,15 @@ public final class ConnectionService extends Service {
             }
             @Override public void onNavigationData(String data) {
                 dispatch(epoch, () -> recordNavigationData(data));
+            }
+            @Override public void onNavigationUpdate(org.json.JSONObject data) {
+                dispatch(epoch, () -> updateNavigationText(data));
+            }
+            @Override public void onNavigationEnded() {
+                dispatch(epoch, () -> {
+                    clearNavigationState("导航已结束");
+                    if (client != null) client.onNavigationLogChanged();
+                });
             }
             @Override public void onHostUiRequested() {
                 dispatch(epoch, () -> {
@@ -600,6 +622,7 @@ public final class ConnectionService extends Service {
         current.setMicSource(prefs.getInt("mic_type", 0));
         current.setAutoPlayMusic(prefs.getBoolean("auto_play_music", false));
         List<BoxSetting> settings = new ArrayList<>();
+        settings.add(BoxSetting.dashboardInfo());
         if (prefs.contains("drive_side")) settings.add(BoxSetting.integer("drivePosition", prefs.getInt("drive_side", 0)));
         if (prefs.contains("media_delay")) settings.add(BoxSetting.integer("mediaDelay", prefs.getInt("media_delay", 0)));
         if (prefs.contains("dock_position")) settings.add(BoxSetting.integer("DockPosition", prefs.getInt("dock_position", 0)));
@@ -716,6 +739,26 @@ public final class ConnectionService extends Service {
     }
 
     private final java.util.ArrayDeque<String> navigationLog = new java.util.ArrayDeque<>();
+    private final NavigationText navigationText = new NavigationText();
+
+    String navigationText() {
+        return navigationText.text();
+    }
+
+    private void clearNavigationState(String message) {
+        navigationText.clear(message);
+    }
+
+    private void updateNavigationText(org.json.JSONObject data) {
+        try {
+            navigationText.update(data);
+        } catch (org.json.JSONException exception) {
+            ErrorLog.record("导航文字字段解析失败", exception);
+            recordNavigationData("导航文字字段解析失败：" + exception.getMessage());
+            return;
+        }
+        if (client != null) client.onNavigationLogChanged();
+    }
 
     String navigationLogText() {
         if (navigationLog.isEmpty()) return "等待盒子上报导航数据（命令 42 / 子类型 200）…";
@@ -746,6 +789,7 @@ public final class ConnectionService extends Service {
     }
 
     private void closeConnection() {
+        clearNavigationState("盒子未连接，等待导航数据");
         generation++;
         BoxProtocolSession old = session;
         session = null;
@@ -760,6 +804,7 @@ public final class ConnectionService extends Service {
         if (wakeLock.isHeld()) wakeLock.release();
         phonePlugged = bluetoothLinked = wifiLinked = false;
         boxVersion = null;
+        boxBluetoothName = boxWifiName = null;
         boxStatus = "盒子：未连接";
         phoneStatus = "手机：未连接";
         notifyClient();

@@ -142,6 +142,7 @@ public final class MainActivity extends Activity {
             updateStage();
         }
         @Override public void onConnectionState() {
+            screens.updateBoxNames();
             showPendingError();
             screens.updateNavigationLog();
             if (screens != null) screens.updateAdvancedStatus();
@@ -838,6 +839,14 @@ public final class MainActivity extends Activity {
     String navigationLogText() {
         return connectionService == null ? "连接服务尚未就绪，等待连接…"
                 : connectionService.navigationLogText();
+    }
+
+    String boxNameText(boolean bluetooth) {
+        if (connectionService == null || connectionService.getSession() == null) {
+            return "未连接盒子";
+        }
+        String name = bluetooth ? connectionService.boxBluetoothName : connectionService.boxWifiName;
+        return name == null ? "尚未收到盒子上报" : name;
     }
 
     void clearNavigationLog() {

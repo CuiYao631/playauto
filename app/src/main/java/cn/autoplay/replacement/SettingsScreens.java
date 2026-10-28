@@ -50,6 +50,8 @@ final class SettingsScreens {
     private TextView overlayPermissionStatus;
     private TextView steeringLog;
     private TextView navigationLog;
+    private TextView boxBluetoothName;
+    private TextView boxWifiName;
     private final java.util.ArrayDeque<String> steeringLogLines = new java.util.ArrayDeque<>();
     private final TextView[] steeringBindings = new TextView[STEERING_COMMANDS.length];
     private ImageView carLogoPreview;
@@ -170,8 +172,8 @@ final class SettingsScreens {
                 host::onNavigationGainChanged);
 
         section("盒子配置（部分设置需重连手机）");
-        navigationRow("蓝牙名称", () -> nameDialog(true));
-        navigationRow("Wifi名称", () -> nameDialog(false));
+        boxBluetoothName = boxNameRow("蓝牙名称", true);
+        boxWifiName = boxNameRow("Wifi名称", false);
         segmentedRow("Wifi频段", new String[]{"2.4 GHz", "5 GHz"}, "wifi_band", 1, host::onBoxSettingsChanged);
         segmentedRow("Dock栏位置", new String[]{"默认", "底部", "驾驶侧"},
                 "dock_position", 0, host::onBoxSettingsChanged);
@@ -305,8 +307,8 @@ final class SettingsScreens {
                 host::clearNavigationLog, host::showSettings);
         TextView help = Ui.text(host, "接收并记录盒子上报的导航 JSON，不自动向原车仪表发送广播。"
                 + "请连接手机并开始导航；是否上报取决于盒子固件和导航应用。"
-                + "连接时发送原版 DashboardInfo=7 配置，日志同时显示配置发送结果和导航开始/结束消息；"
-                + "配置已发送不代表盒子已确认。更新后请拔插盒子并重新连接手机。"
+                + "连接初始化时发送原版 DashboardInfo=7 配置，日志记录收到的导航 JSON 和导航开始/结束消息；"
+                + "配置发送失败请查看错误日志，发送成功不代表盒子已确认。更新后请拔插盒子并重新连接手机。"
                 + "保留最近 50 条，最新在前，服务销毁后清空。"
                 + "数据可能包含道路名、目的地等位置隐私，请谨慎分享。",
                 13, Ui.TEXT_SECONDARY, false);
@@ -451,6 +453,7 @@ final class SettingsScreens {
         steeringHint = null;
         steeringLog = null;
         navigationLog = null;
+        boxBluetoothName = boxWifiName = null;
         java.util.Arrays.fill(steeringBindings, null);
         bluetoothStatusIcon = wifiStatusIcon = null;
         bluetoothStatusIcon = wifiStatusIcon = null;
@@ -701,6 +704,26 @@ final class SettingsScreens {
             dialog.dismiss();
         }));
         dialog.show();
+    }
+
+    void updateBoxNames() {
+        if (boxBluetoothName != null) boxBluetoothName.setText(host.boxNameText(true));
+        if (boxWifiName != null) boxWifiName.setText(host.boxNameText(false));
+    }
+
+    private TextView boxNameRow(String label, boolean bluetooth) {
+        LinearLayout row = baseRow(true);
+        row.addView(title(label), grow());
+        TextView value = Ui.text(host, host.boxNameText(bluetooth), 14, Ui.TEXT_SECONDARY, false);
+        value.setSingleLine();
+        value.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        value.setMaxWidth(dp(220));
+        value.setGravity(Gravity.END);
+        row.addView(value);
+        row.addView(chevron());
+        row.setOnClickListener(view -> nameDialog(bluetooth));
+        addRow(row);
+        return value;
     }
 
     private void audioDebugDialog() {

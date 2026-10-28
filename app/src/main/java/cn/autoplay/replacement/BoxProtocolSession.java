@@ -42,9 +42,12 @@ public final class BoxProtocolSession implements AutoCloseable {
     private static final long AUTO_CONNECT_DELAY_MS = 2000L;
 
     public interface Listener {
+        default void onBoxName(boolean bluetooth, String name) { }
         default void onControlDiagnostic(String message) { }
         default void onError(String message, Throwable error) { }
         default void onNavigationData(String data) { }
+        default void onNavigationUpdate(org.json.JSONObject data) { }
+        default void onNavigationEnded() { }
         default void onHostUiRequested() { }
         void onStatus(String status);
 
@@ -215,7 +218,21 @@ public final class BoxProtocolSession implements AutoCloseable {
         List<BoxSetting> settings = boxSettings;
         runOnControlExecutor(() -> {
             for (BoxSetting setting : settings) {
-                writeFrame(ProtocolFrame.encode(setting.command, setting.payload(), cryptEnabled, nonce));
+                try {
+                    writeFrame(ProtocolFrame.encode(setting.command, setting.payload(), cryptEnabled, nonce));
+                } catch (IOException exception) {
+                    if (setting.command == 25 && listener != null) {
+                        listener.onNavigationData("CMD 25 配置写入失败："
+                                + new String(setting.payload(), java.nio.charset.StandardCharsets.UTF_8)
+                                + "\n" + exception.getMessage());
+                    }
+                    throw exception;
+                }
+                if (setting.command == 25 && listener != null) {
+                    listener.onNavigationData("CMD 25 配置已写入 USB："
+                            + new String(setting.payload(), java.nio.charset.StandardCharsets.UTF_8)
+                            + "\n仅确认本地写入完成，不代表盒子确认；等待 CMD 42 / 200 导航 JSON。");
+                }
             }
         });
     }
@@ -440,6 +457,14 @@ public final class BoxProtocolSession implements AutoCloseable {
                     callState = 0;
                     wifiConnected = false;
                     publishLinkState();
+                } else if (packet.command == 13 || packet.command == 14) {
+                    try {
+                        String name = BoxName.decode(packet.payload);
+                        if (listener != null) listener.onBoxName(packet.command == 13, name);
+                    } catch (IOException exception) {
+                        if (listener != null) listener.onError("读取盒子"
+                                + (packet.command == 13 ? "蓝牙" : "Wi-Fi") + "名称失败", exception);
+                    }
                 } else if (packet.command == 42) {
                     handleDashboardData(packet.payload);
                 } else if (packet.command == CMD_CARPLAY) {
@@ -714,7 +739,11 @@ public final class BoxProtocolSession implements AutoCloseable {
             return;
         }
         int subtype = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt();
-        if (subtype != 200) return;
+        if (subtype != 200) {
+            if (listener != null) listener.onNavigationData("收到 CMD 42 / " + subtype
+                    + "，载荷 " + payload.length + " 字节（非导航 JSON 子类型，不记录内容）");
+            return;
+        }
         int end = payload.length;
         while (end > 4 && payload[end - 1] == 0) end--;
         if (end - 4 > 16384) {
@@ -724,7 +753,8 @@ public final class BoxProtocolSession implements AutoCloseable {
         }
         String data = new String(payload, 4, end - 4, java.nio.charset.StandardCharsets.UTF_8);
         try {
-            new org.json.JSONObject(data);
+            org.json.JSONObject navigation = new org.json.JSONObject(data);
+            if (listener != null) listener.onNavigationUpdate(navigation);
         } catch (org.json.JSONException exception) {
             android.util.Log.e("AutoPlayNavigation", "Invalid navigation JSON", exception);
             data = "JSON 解析失败：" + exception.getMessage() + "\n原始数据：" + data;
@@ -753,6 +783,7 @@ public final class BoxProtocolSession implements AutoCloseable {
             android.util.Log.i("AutoPlay", "CarPlay_RequestHostUI");
             if (listener != null) listener.onHostUiRequested();
         } else if (subcommand == 506 || subcommand == 507) {
+            if (subcommand == 507 && listener != null) listener.onNavigationEnded();
             if (listener != null) listener.onNavigationData("CMD 8 / " + subcommand
                     + (subcommand == 506 ? "：盒子通知导航开始" : "：盒子通知导航结束")
                     + "（独立状态消息，不是导航 JSON）");

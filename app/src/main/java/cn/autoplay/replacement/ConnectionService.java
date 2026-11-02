@@ -53,6 +53,7 @@ public final class ConnectionService extends Service {
     }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final HeadlightNightMode headlightNightMode = new HeadlightNightMode(handler, this::onHeadlightChanged);
     private final LocalBinder binder = new LocalBinder();
     private UsbManager usbManager;
     private UsbTransport connection;
@@ -611,6 +612,8 @@ public final class ConnectionService extends Service {
 
     void refreshSettings() {
         SharedPreferences prefs = prefs();
+        if (prefs.getInt("night_mode", 2) == 3) headlightNightMode.start();
+        else headlightNightMode.stop();
         playback.setOutputGain(prefs.getInt("audio_output_gain", 100) / 100f);
         playback.setNavigationMediaGain(prefs.getInt("navigation_media_gain", 100) / 100f);
         capture.setGainDb(prefs.getInt("mic_gain_db", 0));
@@ -637,7 +640,14 @@ public final class ConnectionService extends Service {
 
     private int currentNightSetting() {
         int mode = prefs().getInt("night_mode", 2);
+        if (mode == 3) return headlightNightMode.currentSetting();
         return mode == 0 ? 1 : mode == 1 ? 0 : -1;
+    }
+
+    private void onHeadlightChanged() {
+        if (destroyed || prefs().getInt("night_mode", 2) != 3) return;
+        BoxProtocolSession current = session;
+        if (current != null) current.setNightMode(headlightNightMode.currentSetting());
     }
 
     void retryMicrophone() {
@@ -813,6 +823,7 @@ public final class ConnectionService extends Service {
     @Override public void onDestroy() {
         destroyed = true;
         client = null;
+        headlightNightMode.stop();
         handler.removeCallbacksAndMessages(null);
         unregisterReceiver(usbReceiver);
         closeConnection();

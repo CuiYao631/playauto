@@ -21,6 +21,28 @@ public final class ProtocolFrameSelfTest {
         testVideoGeometry();
         testOriginalVideoOptions();
         testVendorKeys();
+        testHeadlightNightMode();
+    }
+
+    private enum LightStatus { LIGHT_OPEN, LIGHT_CLOSE, LIGHT_INVALID }
+
+    private static void testHeadlightNightMode() {
+        check(HeadlightNightMode.settingForStatus(LightStatus.LIGHT_OPEN, -1) == 1,
+                "headlights on enables night mode");
+        check(HeadlightNightMode.settingForStatus(LightStatus.LIGHT_CLOSE, -1) == 0,
+                "headlights off disables night mode");
+        for (int previous : new int[]{-1, 0, 1}) {
+            check(HeadlightNightMode.settingForStatus(null, previous) == previous,
+                    "null light status retains last known state");
+            check(HeadlightNightMode.settingForStatus(LightStatus.LIGHT_INVALID, previous) == previous,
+                    "invalid light status retains last known state");
+        }
+        check(HeadlightNightMode.settingForStatus("LIGHT_CLOSE", 1) == 1,
+                "unexpected status type must not turn night mode off");
+        check(HeadlightNightMode.settingForStatus(LightStatus.LIGHT_CLOSE,
+                HeadlightNightMode.settingForStatus(LightStatus.LIGHT_INVALID,
+                        HeadlightNightMode.settingForStatus(LightStatus.LIGHT_OPEN, -1))) == 0,
+                "valid light changes resume after unknown status");
     }
 
     private static void testOriginalVideoOptions() {

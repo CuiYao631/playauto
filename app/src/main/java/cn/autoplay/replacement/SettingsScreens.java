@@ -91,7 +91,7 @@ final class SettingsScreens {
             valueChoiceRow("帧率", "frame_rate", rates, VideoOptions.FRAME_RATES,
                     VideoPreferences.defaultFrameRate(), host::onVideoSettingsChanged);
         }
-        segmentedRow("夜间模式", new String[]{"开", "关", "跟随手机"}, "night_mode", 2, host::onNightModeChanged);
+        segmentedRow("夜间模式", new String[]{"开", "关", "跟随手机", "大灯联动"}, "night_mode", 2, host::onNightModeChanged);
         segmentedRow("驾驶模式", new String[]{"左舵", "右舵"}, "drive_side", 0, host::onBoxSettingsChanged);
         if (prefs().getInt("decoder_mode", VideoOptions.HARDWARE) == VideoOptions.SOFTWARE) {
             infoRow("显示大小（投屏 DPI）", "160（软解，与原版一致）");
@@ -574,7 +574,13 @@ final class SettingsScreens {
 
     private void segmentedRow(String title, String[] options, String key, int defaultIndex, Runnable onChange) {
         LinearLayout row = baseRow(false);
-        row.addView(title(title), grow());
+        boolean stacked = options.length > 3;
+        if (stacked) {
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.addView(title(title));
+        } else {
+            row.addView(title(title), grow());
+        }
 
         LinearLayout control = new LinearLayout(host);
         control.setOrientation(LinearLayout.HORIZONTAL);
@@ -586,7 +592,7 @@ final class SettingsScreens {
             final int index = i;
             segments[i] = Ui.text(host, options[i], 14, Ui.TEXT_SECONDARY, false);
             segments[i].setGravity(Gravity.CENTER);
-            segments[i].setPadding(dp(12), dp(7), dp(12), dp(7));
+            segments[i].setPadding(dp(stacked ? 6 : 12), dp(7), dp(stacked ? 6 : 12), dp(7));
             segments[i].setOnClickListener(view -> {
                 prefs().edit().putInt(key, index).apply();
                 paintSegments(segments, index);
@@ -594,10 +600,17 @@ final class SettingsScreens {
                     onChange.run();
                 }
             });
-            control.addView(segments[i]);
+            if (stacked) control.addView(segments[i], new LinearLayout.LayoutParams(0, -2, 1));
+            else control.addView(segments[i]);
         }
         paintSegments(segments, selected);
-        row.addView(control);
+        if (stacked) {
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+            params.topMargin = dp(8);
+            row.addView(control, params);
+        } else {
+            row.addView(control);
+        }
         addRow(row);
     }
 

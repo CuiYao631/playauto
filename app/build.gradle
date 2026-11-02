@@ -2,6 +2,19 @@ plugins {
     id "com.android.application"
 }
 
+def mcuApiClasses = layout.buildDirectory.dir("mcu-api/classes")
+def compileMcuApi = tasks.register("compileMcuApi", JavaCompile) {
+    source = fileTree("src/mcuApi/java") { include "**/*.java" }
+    classpath = files()
+    destinationDirectory = mcuApiClasses
+    sourceCompatibility = "17"
+    targetCompatibility = "17"
+}
+
+dependencies {
+    compileOnly files(mcuApiClasses).builtBy(compileMcuApi)
+}
+
 def buildStamp = new Date().format("yyyy.MM.dd_HHmmss", TimeZone.getTimeZone("Asia/Shanghai"))
 
 android {

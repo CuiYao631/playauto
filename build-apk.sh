@@ -23,9 +23,13 @@ fi
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/classes" "$OUT_DIR/dex" "$OUT_DIR/native"
 
+mkdir -p "$OUT_DIR/mcu-api"
+find "$PROJECT_DIR/app/src/mcuApi/java" -name '*.java' -print0 |
+    xargs -0 javac -source 17 -target 17 -d "$OUT_DIR/mcu-api"
+
 find "$PROJECT_DIR/app/src/main/java" -name '*.java' -print0 |
     xargs -0 javac -source 17 -target 17 \
-        -classpath "$ANDROID_JAR" \
+        -classpath "$ANDROID_JAR:$OUT_DIR/mcu-api" \
         -d "$OUT_DIR/classes"
 
 jar --create --file "$OUT_DIR/classes.jar" -C "$OUT_DIR/classes" .
@@ -34,7 +38,7 @@ find "$PROJECT_DIR/app/src/test/java" -name '*.java' -print0 |
     xargs -0 javac -source 17 -target 17 \
         -classpath "$OUT_DIR/classes:$ANDROID_JAR" \
         -d "$OUT_DIR/test-classes"
-java -cp "$OUT_DIR/test-classes:$OUT_DIR/classes" \
+java -cp "$OUT_DIR/test-classes:$OUT_DIR/classes:$ANDROID_JAR" \
     cn.autoplay.replacement.ProtocolFrameSelfTest
 
 "$BUILD_TOOLS/aapt" package -f \
@@ -49,7 +53,7 @@ java -cp "$OUT_DIR/test-classes:$OUT_DIR/classes" \
     --rename-manifest-package cn.autoplay.replacement \
     -F "$OUT_DIR/base.apk"
 
-"$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --min-api 19 \
+"$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --classpath "$OUT_DIR/mcu-api" --min-api 19 \
     --output "$OUT_DIR/dex" "$OUT_DIR/classes.jar"
 (
     cd "$OUT_DIR/dex"

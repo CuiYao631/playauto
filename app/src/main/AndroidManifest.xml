@@ -13,6 +13,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
     <!-- Optional legacy system-app deployment; runtime checks the actual grant. -->
     <uses-permission android:name="android.permission.MANAGE_USB"
         tools:ignore="ProtectedPermissions" />
@@ -56,5 +60,10 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
         </activity>
+        <provider
+            android:name=".UpdateFileProvider"
+            android:authorities="cn.autoplay.replacement.update"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

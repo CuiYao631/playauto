@@ -131,6 +131,7 @@ final class SettingsScreens {
                 host::onBootAutoStartChanged, host::showBootAutoStartHelp);
         navigationRow("更多设置", host::showMore);
         infoRow("软件版本", host.appVersion()).setOnClickListener(view -> host.onVersionTapped());
+        navigationRow("检查更新", host::showUpdateCheck);
         String boxVersion = host.boxVersion();
         infoRow("盒子版本", boxVersion == null ? "未连接" : boxVersion);
 

@@ -13,6 +13,8 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
+import android.net.Uri;
+import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -23,6 +25,7 @@ import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Switch;
@@ -34,8 +37,12 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -45,6 +52,7 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_ENV_MICROPHONE = 702;
     private static final int REQUEST_BOOT_NOTIFICATIONS = 703;
     private static final int REQUEST_CONNECTION_NOTIFICATIONS = 704;
+    private static final int REQUEST_INSTALL_PACKAGE = 705;
     private static final int PAGE_SETTINGS = 0;
     private static final int PAGE_MORE = 1;
     private static final int PAGE_ENVIRONMENT = 2;
@@ -865,6 +873,157 @@ public final class MainActivity extends Activity {
             return version == null ? "未知" : version;
         } catch (PackageManager.NameNotFoundException exception) {
             return "未知";
+        }
+    }
+
+    int appVersionCode() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;
+        } catch (PackageManager.NameNotFoundException exception) {
+            return 0;
+        }
+    }
+
+    // ---- 在线更新 ----
+
+    private static final String UPDATE_CHECK_URL =
+            "https://raw.githubusercontent.com/CuiYao631/playauto/main/update.json";
+
+    void showUpdateCheck() {
+        Toast.makeText(this, "正在检查更新...", Toast.LENGTH_SHORT).show();
+        UpdateChecker.check(UPDATE_CHECK_URL, appVersion(), appVersionCode(),
+                new UpdateChecker.Callback() {
+                    @Override
+                    public void onUpdateAvailable(UpdateChecker.UpdateInfo info) {
+                        showUpdateDialog(info);
+                    }
+
+                    @Override
+                    public void onNoUpdate() {
+                        Toast.makeText(MainActivity.this, "已是最新版本", Toast.LENGTH_SHORT).show();
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                    }
+                });
+    }
+
+    private void showUpdateDialog(UpdateChecker.UpdateInfo info) {
+        String message = "发现新版本 " + info.version + "\n\n" + info.notes;
+        new AlertDialog.Builder(this)
+                .setTitle("软件更新")
+                .setMessage(message)
+                .setPositiveButton("立即更新", (dialog, which) -> downloadAndInstall(info.url))
+                .setNegativeButton("稍后", null)
+                .show();
+    }
+
+    private void downloadAndInstall(String downloadUrl) {
+        ProgressBar progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progressBar.setMax(100);
+        progressBar.setProgress(0);
+
+        TextView statusText = Ui.text(this, "正在下载更新...", 14, Ui.TEXT, false);
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(Ui.dp(this, 32), Ui.dp(this, 32), Ui.dp(this, 32), Ui.dp(this, 32));
+        layout.addView(statusText);
+        layout.addView(progressBar);
+        setContentView(layout);
+
+        new AsyncTask<Void, Integer, Object>() {
+            @Override
+            protected Object doInBackground(Void... params) {
+                FileOutputStream fos = null;
+                InputStream in = null;
+                try {
+                    File filesDir = getFilesDir();
+                    File apkFile = new File(filesDir, "update.apk");
+                    if (apkFile.exists()) apkFile.delete();
+
+                    URL url = new URL(downloadUrl);
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setConnectTimeout(15000);
+                    conn.setReadTimeout(30000);
+                    conn.setRequestMethod("GET");
+
+                    int total = conn.getContentLength();
+                    in = conn.getInputStream();
+                    fos = new FileOutputStream(apkFile);
+
+                    byte[] buf = new byte[8192];
+                    int read;
+                    long downloaded = 0;
+                    while ((read = in.read(buf)) != -1) {
+                        fos.write(buf, 0, read);
+                        downloaded += read;
+                        if (total > 0) {
+                            publishProgress((int) (downloaded * 100 / total));
+                        }
+                    }
+                    fos.close();
+                    in.close();
+                    conn.disconnect();
+
+                    return apkFile;
+                } catch (Exception e) {
+                    android.util.Log.e("AutoPlay", "download error", e);
+                    return "下载失败: " + e.getMessage();
+                } finally {
+                    try { if (fos != null) fos.close(); } catch (IOException ignored) {}
+                    try { if (in != null) in.close(); } catch (IOException ignored) {}
+                }
+            }
+
+            @Override
+            protected void onProgressUpdate(Integer... values) {
+                progressBar.setProgress(values[0]);
+                statusText.setText("正在下载更新... " + values[0] + "%");
+            }
+
+            @Override
+            protected void onPostExecute(Object result) {
+                if (result instanceof File) {
+                    installApk((File) result);
+                } else {
+                    Toast.makeText(MainActivity.this, (String) result, Toast.LENGTH_LONG).show();
+                    showSettings();
+                }
+            }
+        }.execute();
+    }
+
+    private void installApk(File apkFile) {
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+        if (Build.VERSION.SDK_INT >= 24) {
+            Uri uri = UpdateFileProvider.getUriForFile(this,
+                    "cn.autoplay.replacement.update", apkFile);
+            intent.setDataAndType(uri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } else {
+            intent.setDataAndType(Uri.fromFile(apkFile),
+                    "application/vnd.android.package-archive");
+        }
+
+        try {
+            startActivityForResult(intent, REQUEST_INSTALL_PACKAGE);
+        } catch (Exception e) {
+            android.util.Log.e("AutoPlay", "install error", e);
+            Toast.makeText(this, "无法安装: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            showSettings();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_INSTALL_PACKAGE) {
+            // User may have cancelled the install
+            showSettings();
         }
     }
 

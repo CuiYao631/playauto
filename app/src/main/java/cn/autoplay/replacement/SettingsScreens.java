@@ -106,13 +106,6 @@ final class SettingsScreens {
         valueChoiceRow("解码方式", "decoder_mode", new String[]{"软解（原版 OpenH264）", "硬解"},
                 new int[]{VideoOptions.SOFTWARE, VideoOptions.HARDWARE},
                 VideoOptions.HARDWARE, host::onDecoderChanged);
-        if (prefs().getInt("decoder_mode", VideoOptions.HARDWARE) == VideoOptions.SOFTWARE) {
-            infoRow("渲染方式", "OpenGL ES 2.0（软解）");
-        } else {
-            segmentedRow("渲染方式", new String[]{"Surface", "Texture"},
-                    "render_mode", 0, host::onRenderChanged);
-        }
-
         section("音频");
         segmentedRow("麦克风", new String[]{"汽车", "手机", "盒子"}, "mic_type", 0, host::onMicSourceChanged);
         sliderRow("麦克风增益", 30, "mic_gain_db", 0, "dB", host::onMicGainChanged);

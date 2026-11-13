@@ -1,7 +1,6 @@
 package cn.autoplay.replacement;
 
 import android.content.Context;
-import android.graphics.SurfaceTexture;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.media.MediaCodecInfo;
@@ -11,7 +10,6 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.MotionEvent;
-import android.view.TextureView;
 import android.widget.FrameLayout;
 
 import java.io.IOException;
@@ -23,7 +21,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 public final class H264SurfaceRenderer extends FrameLayout
-        implements SurfaceHolder.Callback, TextureView.SurfaceTextureListener, AutoCloseable {
+        implements SurfaceHolder.Callback, AutoCloseable {
     public interface Listener {
         void onDecoderError(String error);
 
@@ -65,10 +63,7 @@ public final class H264SurfaceRenderer extends FrameLayout
     private volatile int selectedFrameRate = VideoOptions.DEFAULT_FPS;
     private int activeFrameRate;
     private int activeDecoderMode = -1;
-    private boolean textureRendering;
-    private Surface textureSurface;
     private Surface decoderSurface;
-    private final ConcurrentLinkedQueue<Surface> retiredSurfaces = new ConcurrentLinkedQueue<>();
 
     public H264SurfaceRenderer(Context context, Listener listener) {
         super(context);
@@ -82,16 +77,6 @@ public final class H264SurfaceRenderer extends FrameLayout
         createOutputView();
     }
 
-    void setTextureRendering(boolean enabled) {
-        if (textureRendering != enabled) {
-            textureRendering = enabled;
-            if (decoderMode == 3) return;
-            outputSurface = null;
-            removeAllViews();
-            createOutputView();
-        }
-    }
-
     private void createOutputView() {
         android.view.View view;
         if (decoderMode == 3) {
@@ -99,10 +84,6 @@ public final class H264SurfaceRenderer extends FrameLayout
             softwareView = software;
             software.getHolder().addCallback(this);
             view = software;
-        } else if (textureRendering) {
-            TextureView texture = new TextureView(getContext());
-            texture.setSurfaceTextureListener(this);
-            view = texture;
         } else {
             SurfaceView surface = new SurfaceView(getContext());
             surface.getHolder().addCallback(this);
@@ -200,9 +181,8 @@ public final class H264SurfaceRenderer extends FrameLayout
             decoderExecutor.execute(() -> {
                 VideoFrameQueue.Entry pending = null;
                 long inputWaitStarted = 0;
-                if (!retiredSurfaces.isEmpty() || outputSurface == null) {
+                if (outputSurface == null) {
                     releaseDecoder();
-                    releaseRetiredSurfaces();
                 }
                 if (outputSurface == null || !outputSurface.isValid()) {
                     return;
@@ -211,7 +191,6 @@ public final class H264SurfaceRenderer extends FrameLayout
                     try {
                         if (outputSurface == null || !outputSurface.isValid()) {
                             releaseDecoder();
-                            releaseRetiredSurfaces();
                             return;
                         }
                         if (decodingGeneration != frameQueue.generation()) {
@@ -300,7 +279,7 @@ public final class H264SurfaceRenderer extends FrameLayout
                 decoder = createDecoder(format, requestedMode);
                 android.util.Log.i("AutoPlayVideo", "Configure decoder=" + decoder.getName()
                         + " size=" + frame.getWidth() + "x" + frame.getHeight()
-                        + " mode=" + requestedMode + " texture=" + textureRendering);
+                        + " mode=" + requestedMode);
                 decoder.configure(format, surface, null, 0);
                 decoder.start();
                 pendingCodecConfig = new byte[sps.length + pps.length];
@@ -506,53 +485,12 @@ public final class H264SurfaceRenderer extends FrameLayout
     }
 
     @Override
-    public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
-        textureSurface = new Surface(texture);
-        outputSurface = textureSurface;
-        requestKeyFrame();
-        scheduleDecode();
-    }
-
-    @Override
-    public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {
-        scheduleDecode();
-    }
-
-    @Override
-    public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
-        outputSurface = null;
-        Surface oldSurface = textureSurface;
-        textureSurface = null;
-        if (oldSurface != null) {
-            if (closed) {
-                oldSurface.release();
-            } else {
-                retiredSurfaces.add(oldSurface);
-                scheduleDecode();
-            }
-        }
-        return true;
-    }
-
-    @Override
-    public void onSurfaceTextureUpdated(SurfaceTexture texture) {
-    }
-
-    private void releaseRetiredSurfaces() {
-        Surface surface;
-        while ((surface = retiredSurfaces.poll()) != null) {
-            surface.release();
-        }
-    }
-
-    @Override
     public void close() {
         closed = true;
         frameQueue.clear();
         try {
             decoderExecutor.execute(() -> {
                 releaseDecoder();
-                releaseRetiredSurfaces();
             });
             decoderExecutor.shutdown();
         } catch (java.util.concurrent.RejectedExecutionException ignored) {

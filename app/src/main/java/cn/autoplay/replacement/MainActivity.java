@@ -374,7 +374,6 @@ public final class MainActivity extends Activity {
         videoRenderer.setVisibility(View.GONE);
         videoRenderer.setDecoderMode(getPreferences(MODE_PRIVATE).getInt("decoder_mode", VideoOptions.HARDWARE));
         videoRenderer.setFrameRate(VideoPreferences.frameRate(getPreferences(MODE_PRIVATE)));
-        videoRenderer.setTextureRendering(getPreferences(MODE_PRIVATE).getInt("render_mode", 0) == 1);
     }
 
     private void buildScreen() {
@@ -906,7 +905,6 @@ public final class MainActivity extends Activity {
     }
 
     void onRenderChanged() {
-        videoRenderer.setTextureRendering(getPreferences(MODE_PRIVATE).getInt("render_mode", 0) == 1);
         Toast.makeText(this, getPreferences(MODE_PRIVATE).getInt("decoder_mode", 0) == 3
                         ? "系统解码渲染设置已保存；原版 OpenH264 固定使用 OpenGL ES 2.0"
                         : "已切换渲染方式，等待下一关键帧", Toast.LENGTH_LONG).show();
@@ -1085,7 +1083,6 @@ public final class MainActivity extends Activity {
         }
         videoRenderer.setDecoderMode(VideoOptions.HARDWARE);
         videoRenderer.setFrameRate(VideoPreferences.frameRate(getPreferences(MODE_PRIVATE)));
-        videoRenderer.setTextureRendering(false);
         int[] size = getRequestedVideoSize();
         if (connectionService != null) connectionService.updateVideoSettings(size[0], size[1]);
         onNavigationBarChanged();

@@ -136,7 +136,7 @@ public final class ConnectionService extends Service {
         playback = createPlayback();
         capture = new AudioCapture(error -> handler.post(() -> {
             capturingDecodeType = -1;
-            ErrorLog.record("麦克风采集失败：" + error, null);
+            Log.e(TAG, "麦克风采集失败：" + error);
             setPhoneStatus("手机：麦克风采集失败：" + error);
         }));
         PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
@@ -155,7 +155,7 @@ public final class ConnectionService extends Service {
 
     private AudioPlayback createPlayback() {
         return new AudioPlayback(error -> handler.post(() -> {
-            ErrorLog.record("音频播放失败：" + error, null);
+            Log.e(TAG, "音频播放失败：" + error);
             setBoxStatus("盒子：音频播放失败：" + error);
         }));
     }
@@ -277,7 +277,7 @@ public final class ConnectionService extends Service {
         if (connection != null) return;
         for (UsbDevice device : usbManager.getDeviceList().values()) {
             if (!isTarget(device)) continue;
-            ErrorLog.stage("检测到目标 USB，检查授权");
+            Log.i(TAG, "检测到目标 USB，检查授权");
             if (usbManager.hasPermission(device)) {
                 openDevice(device);
             } else if (clientVisible && !device.getDeviceName().equals(permissionDeviceName)) {
@@ -293,7 +293,7 @@ public final class ConnectionService extends Service {
                                 | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0));
                 permissionDeviceName = device.getDeviceName();
                 try {
-                    ErrorLog.stage("向系统申请 USB 授权");
+                    Log.i(TAG, "向系统申请 USB 授权");
                     usbManager.requestPermission(device, permission);
                     usbPermissionDiagnostic = "已向系统申请 USB 授权，等待回调";
                     Log.i(TAG, usbPermissionDiagnostic + " device=" + device.getDeviceName()
@@ -304,7 +304,7 @@ public final class ConnectionService extends Service {
                     usbPermissionDiagnostic = "申请授权失败：" + exception.getClass().getSimpleName()
                             + "：" + exception.getMessage();
                     Log.e(TAG, usbPermissionDiagnostic, exception);
-                    ErrorLog.record(usbPermissionDiagnostic, exception);
+                    Log.e(TAG, usbPermissionDiagnostic, exception);
                     setBoxStatus("盒子：" + usbPermissionDiagnostic);
                 }
             }
@@ -322,17 +322,17 @@ public final class ConnectionService extends Service {
             Log.w(TAG, legacyUsbPermissionDiagnostic);
             return;
         }
-        ErrorLog.stage("检查旧系统 USB 授权原生库");
+        Log.i(TAG, "检查旧系统 USB 授权原生库");
         if (!BoxCore.isAvailable()) {
             legacyUsbPermissionDiagnostic = "旧系统授权不可用：libnx1 加载失败："
                     + BoxCore.getLoadError();
             Log.e(TAG, legacyUsbPermissionDiagnostic);
-            ErrorLog.record(legacyUsbPermissionDiagnostic, null);
+            Log.e(TAG, legacyUsbPermissionDiagnostic);
             return;
         }
         try {
             // Match the original app, but trust the framework's permission state, not JNI's return.
-            ErrorLog.stage("调用旧系统 JNI USB 授权 BoxCore.stUsb");
+            Log.i(TAG, "调用旧系统 JNI USB 授权 BoxCore.stUsb");
             BoxCore.stUsb(device, usbManager);
             legacyUsbPermissionDiagnostic = usbManager.hasPermission(device)
                     ? "旧系统授权成功：系统已确认 USB 权限"
@@ -342,7 +342,7 @@ public final class ConnectionService extends Service {
             legacyUsbPermissionDiagnostic = "旧系统授权失败："
                     + exception.getClass().getSimpleName() + "：" + exception.getMessage();
             Log.e(TAG, legacyUsbPermissionDiagnostic, exception);
-            ErrorLog.record(legacyUsbPermissionDiagnostic, exception);
+            Log.e(TAG, legacyUsbPermissionDiagnostic, exception);
         }
     }
 
@@ -351,28 +351,7 @@ public final class ConnectionService extends Service {
                 == PackageManager.PERMISSION_GRANTED;
     }
 
-    String usbDiagnostics() {
-        StringBuilder text = new StringBuilder("Android ")
-                .append(Build.VERSION.RELEASE).append(" / API ").append(Build.VERSION.SDK_INT)
-                .append("\n应用前台：").append(clientVisible ? "是" : "否")
-                .append("\n选择通道：Android USB")
-                .append("\n当前通道：").append(connection == null ? "未连接" : connection.name())
-                .append("\n系统应用：").append((getApplicationInfo().flags
-                        & (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0
-                        ? "是" : "否")
-                .append("\nMANAGE_USB：").append(hasUsbManagementPermission() ? "已授予" : "未授予")
-                .append("\n").append(legacyUsbPermissionDiagnostic)
-                .append("\n普通授权：").append(usbPermissionDiagnostic);
-        java.util.Map<String, UsbDevice> devices = usbManager.getDeviceList();
-        text.append("\nUSB 设备数：").append(devices.size());
-        for (UsbDevice device : devices.values()) {
-            text.append("\nVID/PID：").append(Integer.toHexString(device.getVendorId()))
-                    .append("/").append(Integer.toHexString(device.getProductId()))
-                    .append(isTarget(device) ? "（车机盒）" : "（非目标设备）")
-                    .append("；权限：").append(usbManager.hasPermission(device) ? "已允许" : "未允许");
-        }
-        return text.toString();
-    }
+
 
     boolean isNativeUsbConnected() {
         return connection instanceof NativeUsbConnection;
@@ -461,10 +440,10 @@ public final class ConnectionService extends Service {
     private void openDevice(UsbDevice device) {
         if (connection != null || !isTarget(device)) return;
         try {
-            ErrorLog.stage("打开 Android USB 设备");
+            Log.i(TAG, "打开 Android USB 设备");
             connection = UsbConnection.open(usbManager, device);
             deviceName = device.getDeviceName();
-            ErrorLog.stage("初始化连接音频");
+            Log.i(TAG, "初始化连接音频");
             playback.close();
             playback = createPlayback();
             updateBackgroundPolicy();
@@ -472,7 +451,7 @@ public final class ConnectionService extends Service {
             setPhoneStatus("手机：等待盒子状态");
             startProtocol();
         } catch (IOException | SecurityException | IllegalArgumentException exception) {
-            ErrorLog.record("USB 连接初始化失败", exception);
+            Log.e(TAG, "USB 连接初始化失败", exception);
             closeConnection();
             Log.e(TAG, "Cannot open USB device", exception);
             setBoxStatus("盒子：连接失败：" + exception.getMessage());
@@ -486,7 +465,7 @@ public final class ConnectionService extends Service {
     }
 
     private void startProtocol() {
-        ErrorLog.stage("初始化协议会话及盒子配置");
+        Log.i(TAG, "初始化协议会话及盒子配置");
         int epoch = ++generation;
         AudioPlayback sessionPlayback = playback;
         session = new BoxProtocolSession(connection, width, height,
@@ -503,13 +482,11 @@ public final class ConnectionService extends Service {
             }
             @Override public void onError(String message, Throwable error) {
                 dispatch(epoch, () -> {
-                    ErrorLog.record(message, error);
+                    Log.e(TAG, message, error);
                     notifyClient();
                 });
             }
-            @Override public void onControlDiagnostic(String message) {
-                if (generation == epoch) ErrorLog.diagnostic(message);
-            }
+
             @Override public void onPhoneStatus(String status) {
                 dispatch(epoch, () -> setPhoneStatus("手机：" + status));
             }
@@ -588,7 +565,7 @@ public final class ConnectionService extends Service {
         });
         refreshSettings();
         session.start();
-        ErrorLog.stage("协议线程已启动，准备汽车图标");
+        Log.i(TAG, "协议线程已启动，准备汽车图标");
         syncCarLogo();
         notifyClient();
     }
@@ -602,7 +579,7 @@ public final class ConnectionService extends Service {
                 CarLogoUpload.send(this, current, path);
             } catch (IOException | org.json.JSONException exception) {
                 Log.e(TAG, "Cannot upload car logo", exception);
-                ErrorLog.record("读取或上传汽车图标失败", exception);
+                Log.e(TAG, "读取或上传汽车图标失败", exception);
                 handler.post(() -> {
                     if (session == current) setBoxStatus("盒子：读取汽车图标失败：" + exception.getMessage());
                 });
@@ -704,7 +681,7 @@ public final class ConnectionService extends Service {
             return true;
         }
         int action = SteeringProtocol.vendorEnabled(prefs()) ? canonical : command;
-        ErrorLog.diagnostic("方控来源=" + source + "，原始动作=" + command
+        Log.i(TAG, "方控来源=" + source + "，原始动作=" + command
                 + "，分发动作=" + action + "，长安协议=" + SteeringProtocol.vendorEnabled(prefs()));
         if (!sendMediaCommand(action)) {
             Log.w("AutoPlayKeys", "Steering command rejected: " + source + " action=" + command);
@@ -763,7 +740,7 @@ public final class ConnectionService extends Service {
         try {
             navigationText.update(data);
         } catch (org.json.JSONException exception) {
-            ErrorLog.record("导航文字字段解析失败", exception);
+            Log.e(TAG, "导航文字字段解析失败", exception);
             recordNavigationData("导航文字字段解析失败：" + exception.getMessage());
             return;
         }

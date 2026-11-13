@@ -15,7 +15,7 @@ dependencies {
     compileOnly files(mcuApiClasses).builtBy(compileMcuApi)
 }
 
-def buildStamp = new Date().format("yyyy.MM.dd_HHmmss", TimeZone.getTimeZone("Asia/Shanghai"))
+def buildStamp = new Date().format("yyyy.MM.dd.HHmm", TimeZone.getTimeZone("Asia/Shanghai"))
 
 android {
     namespace "cn.autoplay.replacement"

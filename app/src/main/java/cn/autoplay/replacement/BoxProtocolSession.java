@@ -1,6 +1,7 @@
 package cn.autoplay.replacement;
 
 import android.os.SystemClock;
+import android.util.Log;
 
 import cn.manstep.phonemirrorBox.BoxInterface.BoxCore;
 
@@ -43,7 +44,6 @@ public final class BoxProtocolSession implements AutoCloseable {
 
     public interface Listener {
         default void onBoxName(boolean bluetooth, String name) { }
-        default void onControlDiagnostic(String message) { }
         default void onError(String message, Throwable error) { }
         default void onNavigationData(String data) { }
         default void onNavigationUpdate(org.json.JSONObject data) { }
@@ -252,7 +252,7 @@ public final class BoxProtocolSession implements AutoCloseable {
         android.util.Log.i("AutoPlayKeys", "command_queued button="
                 + SettingsScreens.steeringActionName(command) + " callState=" + callState
                 + " wireCommands=" + java.util.Arrays.toString(commands));
-        controlDiagnostic("方控动作=" + command + "，电话状态=" + callState
+        Log.i("AutoPlayKeys", "方控动作=" + command + "，电话状态=" + callState
                 + "，排队命令=" + java.util.Arrays.toString(commands));
         for (int value : commands) sendCarPlayCommand(value);
         return true;
@@ -271,9 +271,7 @@ public final class BoxProtocolSession implements AutoCloseable {
 
     private volatile int callState;
 
-    private void controlDiagnostic(String message) {
-        if (listener != null) listener.onControlDiagnostic(message);
-    }
+
 
     private void sendMicSource() {
         int source = micSourceSetting;
@@ -295,7 +293,7 @@ public final class BoxProtocolSession implements AutoCloseable {
         runOnControlExecutor(() -> {
             writeFrame(ProtocolFrame.encode(CMD_CARPLAY, payload, cryptEnabled, nonce));
             if (value == 300 || value == 301) {
-                controlDiagnostic("已写入 USB：CMD 8 / " + value
+                Log.i("AutoPlayKeys", "已写入 USB：CMD 8 / " + value
                         + "（不代表手机已执行）");
             }
         });
@@ -666,7 +664,7 @@ public final class BoxProtocolSession implements AutoCloseable {
             if (control == 14 || control == 4 || control == 5) {
                 android.util.Log.i("AutoPlayKeys", "phone_audio_control=" + control
                         + " callState=" + callState);
-                controlDiagnostic("电话音频控制=" + control + "，电话状态=" + callState
+                Log.i("AutoPlayKeys", "电话音频控制=" + control + "，电话状态=" + callState
                         + "，音频类型=" + audioType + "，解码类型=" + decodeType);
             }
             if (control == 2 && listener != null) {

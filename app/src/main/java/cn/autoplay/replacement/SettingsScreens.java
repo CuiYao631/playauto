@@ -58,7 +58,7 @@ final class SettingsScreens {
     private Widgets.LinkIcon bluetoothStatusIcon;
     private Widgets.LinkIcon wifiStatusIcon;
     private TextView advancedRootStatus;
-    private TextView advancedUsbStatus;
+
     private final java.util.ArrayList<Runnable> voiceStatusRefreshers = new java.util.ArrayList<>();
 
     SettingsScreens(MainActivity host) {
@@ -178,9 +178,6 @@ final class SettingsScreens {
         segmentedRow("Dock栏位置", new String[]{"默认", "底部", "驾驶侧"},
                 "dock_position", 0, host::onBoxSettingsChanged);
 
-        section("诊断");
-        navigationRow("错误日志", host::showErrorLog);
-
         if (host.advancedFeaturesUnlocked()) {
             section("高级功能");
             navigationRow("高级功能", host::showAdvanced);
@@ -222,8 +219,7 @@ final class SettingsScreens {
                         + "其他原车语音功能也可能受到影响。");
         section("USB 权限状态");
         LinearLayout usbCard = Ui.card(host);
-        advancedUsbStatus = Ui.text(host, "", 13, Ui.TEXT_SECONDARY, false);
-        usbCard.addView(advancedUsbStatus);
+
         list.addView(usbCard);
         TextView help = Ui.text(host, "进入本页不会自动请求 Root。Root 状态仅代表本次应用运行期间"
                 + "最近一次检查，管理器可能随时撤销授权；再次点击申请可重新验证。"
@@ -298,7 +294,7 @@ final class SettingsScreens {
 
     void updateAdvancedStatus() {
         if (advancedRootStatus != null) advancedRootStatus.setText(RootUsbAuthorization.rootStatus());
-        if (advancedUsbStatus != null) advancedUsbStatus.setText(host.advancedUsbStatus());
+
         for (Runnable refresh : voiceStatusRefreshers) refresh.run();
     }
 

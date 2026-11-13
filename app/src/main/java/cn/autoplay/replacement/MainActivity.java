@@ -129,7 +129,6 @@ public final class MainActivity extends Activity {
     private boolean activityVisible;
     private boolean hostPageRequested;
     private boolean requestingMicrophone;
-    private android.app.AlertDialog errorDialog;
     private final ConnectionService.Client connectionClient = new ConnectionService.Client() {
         @Override public void onNavigationLogChanged() {
             screens.updateNavigationLog();
@@ -143,7 +142,6 @@ public final class MainActivity extends Activity {
         }
         @Override public void onConnectionState() {
             screens.updateBoxNames();
-            showPendingError();
             screens.updateNavigationLog();
             if (screens != null) screens.updateAdvancedStatus();
             ConnectionService service = connectionService;
@@ -251,62 +249,9 @@ public final class MainActivity extends Activity {
         AndroidCompat.registerReceiver(this, vendorKeyReceiver, vendorFilter, true);
         vendorKeysRegistered = true;
         if (connectionService != null) connectionService.setClientVisible(true);
-        showPendingError();
     }
 
-    private void showPendingError() {
-        if (!activityVisible || isFinishing() || isDestroyed() || errorDialog != null) return;
-        String pending = ErrorLog.pending();
-        if (pending.isEmpty()) return;
-        showErrorDialog("运行错误", pending
-                + "\n\n完整记录可在设置 → 更多设置 → 错误日志查看。");
-        ErrorLog.acknowledge(pending);
-    }
 
-    void showErrorLog() {
-        if (errorDialog == null) showErrorDialog("错误日志", ErrorLog.history());
-    }
-
-    private void showErrorDialog(String title, String detail) {
-        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
-        TextView text = Ui.text(this, detail, 13, Ui.TEXT, false);
-        text.setTextIsSelectable(true);
-        int padding = Ui.dp(this, 16);
-        text.setPadding(padding, padding, padding, padding);
-        scroll.addView(text);
-        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
-                .setTitle(title).setView(scroll)
-                .setPositiveButton("关闭", null)
-                .setNeutralButton("复制", null)
-                .setNegativeButton("清空日志", null).create();
-        errorDialog = dialog;
-        dialog.setOnDismissListener(ignored -> {
-            errorDialog = null;
-            showPendingError();
-        });
-        dialog.setOnShowListener(ignored -> {
-            dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view -> {
-                android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
-                        getSystemService(CLIPBOARD_SERVICE);
-                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("PlayAuto 错误日志", text.getText()));
-                Toast.makeText(this, "日志已复制，请注意隐私", Toast.LENGTH_SHORT).show();
-            });
-            dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).setOnClickListener(view ->
-                    new android.app.AlertDialog.Builder(this).setTitle("清空错误日志")
-                            .setMessage("仅清空诊断日志，不影响应用设置。")
-                            .setNegativeButton("取消", null)
-                            .setPositiveButton("清空", (confirmation, which) -> {
-                                try {
-                                    ErrorLog.clear();
-                                    text.setText(ErrorLog.history());
-                                } catch (java.io.IOException exception) {
-                                    android.util.Log.e("AutoPlay", "Cannot clear error log", exception);
-                                    text.setText("清空失败：" + exception);
-                                }
-                            }).show());
-        });
-        dialog.show();
-    }
 
     @Override
     protected void onPause() {
@@ -323,11 +268,6 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        if (errorDialog != null) {
-            errorDialog.setOnDismissListener(null);
-            errorDialog.dismiss();
-            errorDialog = null;
-        }
         if (testTone != null) {
             testTone.release();
             testTone = null;
@@ -809,10 +749,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    String advancedUsbStatus() {
-        return connectionService == null ? "连接服务尚未就绪"
-                : connectionService.usbDiagnostics();
-    }
+
 
     void openOverlayPermission() {
         Intent intent = new Intent(Build.VERSION.SDK_INT >= 23

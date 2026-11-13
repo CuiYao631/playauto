@@ -20,6 +20,8 @@ if [ ! -f "$ANDROID_JAR" ]; then
     exit 1
 fi
 
+BUILD_VERSION=$(TZ=Asia/Shanghai date '+%Y.%m.%d.%H%M')
+
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/classes" "$OUT_DIR/dex" "$OUT_DIR/native"
 
@@ -49,7 +51,7 @@ java -cp "$OUT_DIR/test-classes:$OUT_DIR/classes:$ANDROID_JAR" \
     --min-sdk-version 19 \
     --target-sdk-version 35 \
     --version-code 1 \
-    --version-name 0.1.0 \
+    --version-name "$BUILD_VERSION" \
     --rename-manifest-package cn.autoplay.replacement \
     -F "$OUT_DIR/base.apk"
 

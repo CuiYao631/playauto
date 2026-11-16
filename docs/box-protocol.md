@@ -45,9 +45,12 @@ USB 层不做任何加解密，字节流原样收发。
 - 盒子下发 `240 CMD_ENABLE_CRYPT` 后，主机置 `bCrypt = true`
 - 此后**除** `cmd ∈ {1, 2, 3, 6, 7, 44}` 和「手机已连接时的 cmd 5」外，
   下行控制帧改用 `0x55BB55BB`；媒体帧（视频/音频/Open/Phase）保持 `0x55AA55AA`
+- **负载长度为 0 的帧永远不加密、也不切 magic**（`oO0O00o._oOoOOO()` 在
+  `length == 0` 时直接 `return`）。心跳 `170`、重启 `206` 都属于这一类
 
-> 负载本身在 Java 层没有被加密，`0x55BB55BB` 是「加密能力已协商」的标记位。
-> 真正的加解密（若有）在 `BoxCore.stCheck` 的 native 层，公开代码路径里走的是明文。
+> `0x55BB55BB` 不只是标记位：非白名单命令在写帧前会调用
+> `BoxCore.stCheck(true, payload, nonce, payload)` 就地加密，读帧时再用
+> `stCheck(false, ...)` 解密。所以主机与盒子必须共享同一个 32 位 nonce。
 
 ---
 
@@ -59,11 +62,11 @@ USB 层不做任何加解密，字节流原样收发。
 | 5 | `CMD_TOUCH` | 16 B | 触摸事件，见 §6 |
 | 8 | `CMD_CARPLAY_CMD` | 4 B int | CarPlay 子命令，见 §7 |
 | 9 | `CMD_CARPLAY_LOGO_TYPE` | 4 B int | 车标类型 |
-| 10 | `CMD_BLUETOOTH_ADDR` | 17 B | 盒子蓝牙 MAC（ASCII + `\0`） |
+| 10 | `CMD_BLUETOOTH_ADDR` | 17 B | **车机侧**蓝牙 MAC（ASCII）；原版靠私有广播 `AUTO_BOX_CONTROL_CMD_EVT`(data=100) 透传，长按车机无此广播，故 playAuto 不实现 |
 | 13 | `CMD_BOX_BLUETOOTH_NAME` | ≤15 B | 盒子蓝牙名 |
 | 14 | `CMD_BOX_WIFI_NAME` | ≤15 B | 盒子 WiFi 名 |
 | 15 | `CMD_MANUAL_DISCONNECT` | 0 | 主机主动断开手机 |
-| 17 | `CMD_AUTO_CONN_BT_ADDR` | 17 B | 自动回连目标 MAC |
+| 17 | `CMD_AUTO_CONN_BT_ADDR` | 17 B | 指定自动回连目标 MAC；与 `8/1002` 互补，1002 由盒子自选 |
 | 18 | `CMD_BLUETOOTH_PAIRED_LIST` | N | 已配对列表，换行分隔 |
 | 20 | `CMD_CAR_MANUFACTURER_INFO` | 8 B | 2 × int32 |
 | 22 | `CMD_CAMERA_INFO` | 4 + N | 首 int 固定 `1`，后接数据 |
@@ -75,7 +78,7 @@ USB 层不做任何加解密，字节流原样收发。
 | 160 | `CMD_APP_INFO` | JSON | App/设备信息 + 进程 PID |
 | 162 | `CMD_CONFIG` | JSON | 盒子配置项（单键值） |
 | 170 | `CMD_HEARTBEAT` | 0 | 心跳，固定 2000 ms 一次 |
-| 206 | `CMD_BOX_REBOOT` | 0 | 重启盒子 |
+| 206 | `CMD_BOX_REBOOT` | 0 | 重启盒子；零负载、明文 magic `0x55AA55AA` |
 | 240 | `CMD_ENABLE_CRYPT` | 4 B int | 下发随机 32 位密钥，握手加密模式 |
 
 ### `CMD_TOUCH` (5) 负载 16 B
@@ -415,7 +418,7 @@ sequenceDiagram
 | 6 `CMD_VIDEO_FRAME` | ✅ 含 ≥`2024.12.13.1130` 的时间戳分支 |
 | 7 `CMD_AUDIO_FRAME` | ✅ |
 | 13 / 14 盒子名称 | ✅ |
-| 18 `BLUETOOTH_PAIR_LIST` | ✅ |
+| 18 `BLUETOOTH_PAIR_LIST` | ✅ 解析为 (MAC, 名称) 列表，供 cmd 17 选择 |
 | 23 `MULTI_TOUCH` | ✅ |
 | 25 `CMD_BOX_INFO` | ✅ **本次新增**，解析 uuid / MFD / productType / fileName |
 | 42 仪表数据 | ✅ |
@@ -425,8 +428,48 @@ sequenceDiagram
 | **187 `CMD_UPDATE`** | ✅ **本次新增** |
 | 204 `BOX_SOFTWARE_VERSION` | ✅ |
 | 240 `ENABLE_CRYPT` | ✅ 含 native `stCheck` |
+| **206 `BOX_REBOOT`** | ✅ **本次新增**：升级成功（187=2/6）后自动下发，另可在设置页手动触发 |
+| **17 `AUTO_CONN_BT_ADDR`** | ✅ 设置 → 更多设置 → 盒子配置 →「指定回连手机」；列表来自 cmd 18 |
+| 10 `BLUETOOTH_ADDR` | ⛔ **不实现**：来源是私有广播 `AUTO_BOX_CONTROL_CMD_EVT`，长按车机不发送 |
 
-仍**未实现**：`8` 盒子侧上报的部分子命令、`11` 显示模式变化、`22` 摄像头、`24` HiCar URL、`43` PIN 码、`44` 副屏帧、`119`/`136`/`161`/`163`。
+### 未实现清单
+
+盒子 → 主机：
+
+| cmd | 名称 | 备注 |
+|---|---|---|
+| 11 | `CMD_CARPLAY_MODE_CHANGE` | 28 B，7 个 int（显示模式/边距等） |
+| 19 | `CMD_BLUETOOTH_ONLINE_LIST` | 在线设备列表，原版广播 211 |
+| 22 | `CMD_CAMERA_INFO` | `2`=取图像块 / `3`=开 / `4`=关摄像头 |
+| 24 | `CMD_HICAR_URL` | phoneType==6 时展示连接 URL |
+| 43 | `CMD_CONNECTION_PIN_CODE` | phoneType 6/7 弹配对码 |
+| 44 | `CMD_DASHBOARD_FRAME` | 副屏 H.264 帧 |
+| 119 | `CMD_APP_RESET` | 要求 App 重置 |
+| 136 | `CMD_DEBUG_TEST` | 仅打日志 |
+| 153 | `CMD_FILE`（盒子→主机） | 拉 log / apk；playAuto 只实现主机→盒子写入 |
+| 161 | `CMD_APP_LOG_GET` | 要求上传 App 日志 |
+| 163 | `CMD_CRYPT_BOX_INFO` | 加密版盒子信息 |
+
+主机 → 盒子：
+
+| cmd | 名称 | 备注 |
+|---|---|---|
+| 5 | `CMD_TOUCH`（旧式单指） | playAuto 一律走 23 `MULTI_TOUCH` |
+| 18 | `CMD_BLUETOOTH_PAIR_LIST`（写回） | 原版长按删除某条后回写新列表 |
+| 22 | `CMD_CAMERA_INFO` | 摄像头控制 |
+| 160 | `CMD_APP_INFO` | version/uuid/model/platform/huid 等大段 JSON |
+| 8/1013 | `CMD_AUTO_CONNECT` `requestBluetoothOnlineList` | 请求在线蓝牙列表（配合 19） |
+| 10 | `CMD_BLUETOOTH_ADDR` | 车机侧 MAC；常安车机无对应广播，明确不做 |
+
+半实现项：
+
+- `42 CMD_DASHBOARD_DATA` 只处理 subtype `200`（导航 JSON）；缺 `1` 文本、`2/3` 封面图、`100` JSON、`202/203` 原始
+- `8 CMD_CARPLAY` 上报缺 `7/8/9/10/15`（麦克风来源协商）、`500/501`（断连/重连提示）、`1000`（支持 WiFi）、`1003~1006`、`1011/1012`（需 KO）
+- `6 CMD_VIDEO_FRAME` 的 `flags` 解析出来但未使用：缺 `bit0` 熄屏编码（原版广播 10/11）、`bit2-3` 解码方式运行时切换
+- `25 CMD_BOX_SETTINGS` 只发 4 个单键 JSON；缺 `naviScreenInfo`（HUD 安全区）、`ViewAreaInfo`（多窗口）、`cornerMasks`、`MapThemeMode`、`GNSSCapability`、`fps/dpi/尺寸`
+- `4 CMD_PLUGOUT` 未区分值 `1`（手机端主动断开）
+- `1 CMD_OPEN` 收到空负载时不会按原版重发 `g_Open`
+- 未知命令被静默丢弃，无日志
 
 ### 固件升级链路（已打通）
 
@@ -455,10 +498,19 @@ sequenceDiagram
         S->>UI: 进度条 + 百分比
     end
     B->>P: cmd=187 status=2
-    Note over UI: 「升级成功，等待盒子重启…」
+    Note over UI: 「升级成功，正在重启盒子…」
+    P->>B: 1.5s 后 cmd=206 CMD_BOX_REBOOT（零负载 / 明文 magic）
     Note over B,S: 盒子重启 → USB 断开 → 重新连接 → cmd=204
     S->>UI: 检测到重连，自动退出升级页
 ```
+
+重启策略说明：
+
+- 只有 `187` 状态 `2`（升级成功）与 `6`（OTA 成功）会触发，`1/5` 开始和 `3/7` 失败都不发
+- 延时 1.5 s，避免重启指令抢在成功回报之前把 USB 掐断
+- 部分盒子固件升级完会自行重启，此时写帧会失败；按正常情况处理，只记状态文案，不弹错误
+- `206` 用明文 magic 是刻意的：即使 `libnx1` 未加载或加密状态失步也能送达
+  （原版也是只在读帧出错时用它做恢复）
 
 ### 固件升级页面（`MainActivity`）
 
@@ -467,7 +519,7 @@ sequenceDiagram
 | 阶段 | 触发 | 显示 | 可否退出 |
 |---|---|---|---|
 | `FIRMWARE_UPGRADING` | 187=1/5 或 177 进度到达 | 进度条 + 百分比 + 「请勿断电」+ 等待重启提示 | ❌ 返回键被拦截 |
-| `FIRMWARE_WAIT_REBOOT` | 187=2/6 | 100% + 「升级成功，等待盒子重启…」 | ✅ |
+| `FIRMWARE_WAIT_REBOOT` | 187=2/6 | 100% + 「升级成功，正在重启盒子…」 | ✅ |
 | `FIRMWARE_FAILED` | 187=3/7 或升级中会话中断 | 「升级失败」+ 原因 | ✅ |
 | `IDLE` | 退出/自动完成 | 回到进入前的页面 | — |
 

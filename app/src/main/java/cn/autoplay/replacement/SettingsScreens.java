@@ -178,6 +178,10 @@ final class SettingsScreens {
         segmentedRow("Wifi频段", new String[]{"2.4 GHz", "5 GHz"}, "wifi_band", 1, host::onBoxSettingsChanged);
         segmentedRow("Dock栏位置", new String[]{"默认", "底部", "驾驶侧"},
                 "dock_position", 0, host::onBoxSettingsChanged);
+        toggleRow("升级成功后重启盒子", "reboot_after_upgrade", true,
+                value -> host.onBoxSettingsChanged(), host::showRebootAfterUpgradeHelp);
+        navigationRow("立即重启盒子", host::onRebootBoxTapped);
+        navigationRow("指定回连手机", host::showAutoConnectDevicePicker);
 
         if (host.advancedFeaturesUnlocked()) {
             section("高级功能");

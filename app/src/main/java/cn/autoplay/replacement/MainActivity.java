@@ -1280,8 +1280,8 @@ public final class MainActivity extends Activity {
                 break;
             case FIRMWARE_WAIT_REBOOT:
                 firmwarePage.setProgress(100);
-                firmwarePage.setStatus("升级成功，等待盒子重启…", Ui.ACCENT);
-                firmwarePage.setHint("盒子重启并重新连接后会自动退出本页面");
+                firmwarePage.setStatus("升级成功，正在重启盒子…", Ui.ACCENT);
+                firmwarePage.setHint("已向盒子下发重启指令，重新连接后会自动退出本页面");
                 firmwarePage.setExitVisible(true);
                 break;
             case FIRMWARE_FAILED:
@@ -1679,6 +1679,78 @@ public final class MainActivity extends Activity {
         Toast.makeText(this, enabled
                 ? "后台连接已开启；连接盒子后显示常驻通知，请允许车机后台运行"
                 : "后台连接已关闭，退出页面后不再保证保持连接", Toast.LENGTH_LONG).show();
+    }
+
+    void showRebootAfterUpgradeHelp() {
+        new AlertDialog.Builder(this)
+                .setTitle("升级成功后重启盒子")
+                .setMessage("固件升级成功（盒子回报状态 2 或 6）后，PlayAuto 会在约 1.5 秒后"
+                        + "向盒子下发重启指令（CMD 206），让新固件立即生效。"
+                        + "\n\n部分盒子固件升级完会自行重启。此时指令可能因为 USB 已断开"
+                        + "而写入失败，属正常现象，不会提示错误。"
+                        + "\n\n重启期间投屏会中断，盒子重新枚举后自动恢复连接。"
+                        + "如果升级后出现异常，可在下方「立即重启盒子」手动重试。")
+                .setPositiveButton("知道了", null)
+                .show();
+    }
+
+    void onRebootBoxTapped() {        ConnectionService service = connectionService;
+        if (service == null) {
+            Toast.makeText(this, "请先连接盒子", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("立即重启盒子")
+                .setMessage("重启会让投屏中断数秒，盒子重新连接后自动恢复。确定重启？")
+                .setPositiveButton("重启", (dialog, which) -> {
+                    boolean sent = service.rebootBox();
+                    Toast.makeText(this, sent
+                            ? "已发送重启指令，等待盒子重新连接"
+                            : "重启指令未送达，请检查盒子连接",
+                            Toast.LENGTH_LONG).show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /**
+     * 选择「点名回连」的手机（{@code CMD_AUTO_CONN_BT_ADDR} 17）。
+     *
+     * <p>列表来自盒子 {@code CMD_BLUETOOTH_PAIR_LIST}(18) 的上报。与「自动连接」
+     * 不同：自动连接用 {@code 8/1002} 让盒子自己挑，多台已配对手机时可能挑错。
+     */
+    void showAutoConnectDevicePicker() {
+        ConnectionService service = connectionService;
+        if (service == null) {
+            Toast.makeText(this, "请先连接盒子", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        java.util.List<BoxProtocolSession.PairedDevice> devices = service.pairedDevices();
+        if (devices.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("指定回连手机")
+                    .setMessage("盒子还没有上报已配对手机列表。请确认手机上已完成过一次"
+                            + "与盒子蓝牙的配对，然后重新插拔盒子。")
+                    .setPositiveButton("知道了", null)
+                    .show();
+            return;
+        }
+        String[] labels = new String[devices.size()];
+        for (int index = 0; index < devices.size(); index++) {
+            labels[index] = devices.get(index).toString();
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("指定回连手机")
+                .setItems(labels, (dialog, which) -> {
+                    BoxProtocolSession.PairedDevice device = devices.get(which);
+                    boolean sent = service.autoConnectToDevice(device.getMac());
+                    Toast.makeText(this, sent
+                            ? "已请求盒子回连 " + device
+                            : "指定回连指令未送达，请检查盒子连接",
+                            Toast.LENGTH_LONG).show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     void showBackgroundConnectionHelp() {

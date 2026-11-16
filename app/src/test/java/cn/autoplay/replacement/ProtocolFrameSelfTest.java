@@ -23,6 +23,7 @@ public final class ProtocolFrameSelfTest {
         testVendorKeys();
         testHeadlightNightMode();
         testBoxFirmwarePayload();
+        testAutoConnectByBluetoothAddress();
         testSteeringKeyCodeParsing();
         testFrameRateNormalization();
         testNightModeSelection();
@@ -303,6 +304,66 @@ public final class ProtocolFrameSelfTest {
                 "vendor VR short press sends home");
     }
 
+    private static void testAutoConnectByBluetoothAddress() {
+        // MAC 校验：17 字符 AA:BB:CC:DD:EE:FF
+        check(BoxProtocolSession.isValidBluetoothMac("AA:BB:CC:DD:EE:FF"), "uppercase mac accepted");
+        check(BoxProtocolSession.isValidBluetoothMac("aa:bb:cc:dd:ee:ff"), "lowercase mac accepted");
+        check(BoxProtocolSession.isValidBluetoothMac("00:11:22:33:44:55"), "numeric mac accepted");
+        check(!BoxProtocolSession.isValidBluetoothMac("AA:BB:CC:DD:EE"), "16-char mac rejected");
+        check(!BoxProtocolSession.isValidBluetoothMac("AA:BB:CC:DD:EE:FF:00"), "20-char mac rejected");
+        check(!BoxProtocolSession.isValidBluetoothMac("AA-BB-CC-DD-EE:FF"), "mixed separator rejected");
+        check(BoxProtocolSession.isValidBluetoothMac("AA-BB-CC-DD-EE-FF"), "hyphen-only mac accepted");
+        check(!BoxProtocolSession.isValidBluetoothMac("GG:BB:CC:DD:EE:FF"), "non-hex rejected");
+        check(!BoxProtocolSession.isValidBluetoothMac(""), "empty mac rejected");
+        check(!BoxProtocolSession.isValidBluetoothMac(null), "null mac rejected");
+        // 名字里恰好含 17 字符的行不能被当成 MAC
+        check(!BoxProtocolSession.isValidBluetoothMac("iPhone 15 Pro Max"), "device name rejected");
+
+        // cmd 17 负载：17 字节 ASCII，大写
+        byte[] payload = BoxProtocolSession.createAutoConnectAddressPayload("aa:bb:cc:dd:ee:ff");
+        check(payload.length == 17, "auto-connect payload is 17 bytes");
+        String decoded = new String(payload, StandardCharsets.US_ASCII);
+        check(decoded.equals("AA:BB:CC:DD:EE:FF"), "auto-connect payload is uppercased ascii");
+
+        // 用户用 '-' 输入时统一规范化成 ':'
+        byte[] hyphenPayload = BoxProtocolSession.createAutoConnectAddressPayload("aa-bb-cc-dd-ee-ff");
+        check(new String(hyphenPayload, StandardCharsets.US_ASCII).equals("AA:BB:CC:DD:EE:FF"),
+                "hyphen mac normalized to colon form");
+
+        // 非法地址必须拒绝，不能把脏数据写进 USB
+        boolean threw = false;
+        try {
+            BoxProtocolSession.createAutoConnectAddressPayload("not-a-mac");
+        } catch (IllegalArgumentException expected) {
+            threw = true;
+        }
+        check(threw, "invalid mac throws");
+
+        // cmd 18 负载解析：每行「17 字符 MAC + 名字」，结尾 \0
+        String raw = "AA:BB:CC:DD:EE:FFiPhone 15\n"
+                + "11:22:33:44:55:66Mate 60 Pro\n"
+                + "short\n"
+                + "ZZ:BB:CC:DD:EE:FFbad mac\n"
+                + "\0";
+        java.util.List<BoxProtocolSession.PairedDevice> devices =
+                BoxProtocolSession.parseBluetoothPairList(raw);
+        check(devices.size() == 2, "pair list keeps only valid lines");
+        check(devices.get(0).getMac().equals("AA:BB:CC:DD:EE:FF"), "first mac parsed");
+        check(devices.get(0).getName().equals("iPhone 15"), "first name parsed");
+        check(devices.get(1).getMac().equals("11:22:33:44:55:66"), "second mac parsed");
+        check(devices.get(1).getName().equals("Mate 60 Pro"), "second name parsed");
+
+        // 空负载 / 仅 \0
+        check(BoxProtocolSession.parseBluetoothPairList("").isEmpty(), "empty pair list");
+        check(BoxProtocolSession.parseBluetoothPairList("\0").isEmpty(), "nul-only pair list");
+        check(BoxProtocolSession.parseBluetoothPairList(null).isEmpty(), "null pair list");
+
+        // 无设备名时 toString 退化为 MAC
+        BoxProtocolSession.PairedDevice nameless =
+                BoxProtocolSession.parseBluetoothPairList("AA:BB:CC:DD:EE:FF\n").get(0);
+        check(nameless.toString().equals("AA:BB:CC:DD:EE:FF"), "nameless device shows mac");
+    }
+
     private static void testBoxFirmwarePayload() throws Exception {
         // 固件下发：cmd 153 的 4+pathLen+4+dataLen 结构
         byte[] image = new byte[]{0x11, 0x22, 0x33, 0x44};
@@ -334,6 +395,24 @@ public final class ProtocolFrameSelfTest {
         check(BoxProtocolSession.describeFirmwareStatus(5).equals("OTA 开始"), "187:5 ota start");
         check(BoxProtocolSession.describeFirmwareStatus(6).equals("OTA 成功"), "187:6 ota success");
         check(BoxProtocolSession.describeFirmwareStatus(7).equals("OTA 失败"), "187:7 ota failure");
+
+        // 升级成功后主动重启：只有 2/6 需要下发 cmd 206
+        check(BoxProtocolSession.shouldRebootAfterUpgrade(2), "187:2 triggers reboot");
+        check(BoxProtocolSession.shouldRebootAfterUpgrade(6), "187:6 triggers reboot");
+        check(!BoxProtocolSession.shouldRebootAfterUpgrade(1), "187:1 does not reboot");
+        check(!BoxProtocolSession.shouldRebootAfterUpgrade(3), "187:3 does not reboot");
+        check(!BoxProtocolSession.shouldRebootAfterUpgrade(5), "187:5 does not reboot");
+        check(!BoxProtocolSession.shouldRebootAfterUpgrade(7), "187:7 does not reboot");
+        check(!BoxProtocolSession.shouldRebootAfterUpgrade(0), "187:0 does not reboot");
+
+        // cmd 206 帧必须是零负载 + 明文 magic，与原版 length==0 提前返回的分支一致
+        byte[] rebootFrame = BoxProtocolSession.createRebootFrame();
+        check(rebootFrame.length == 16, "reboot frame carries only the 16-byte header");
+        ByteBuffer reboot = ByteBuffer.wrap(rebootFrame).order(ByteOrder.LITTLE_ENDIAN);
+        check(reboot.getInt(0) == 0x55AA55AA, "reboot frame uses legacy magic");
+        check(reboot.getInt(4) == 0, "reboot frame payload length is zero");
+        check(reboot.getInt(8) == 206, "reboot frame command is CMD_BOX_REBOOT");
+        check(reboot.getInt(12) == ~206, "reboot frame check is ~cmd");
 
         // checkBox 表单：version 字典序比较即时间序
         check(BoxFirmwareChecker.compareVersion("2025.03.20.1130", "2024.07.08.0000") > 0,

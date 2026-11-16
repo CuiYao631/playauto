@@ -32,6 +32,13 @@ public final class BoxProtocolSession implements AutoCloseable {
     // Same per-transfer limit as the original app; larger bulk writes fail on many hosts.
     private static final int USB_WRITE_CHUNK_SIZE = 16384;
     private static final int CMD_BLUETOOTH_PAIR_LIST = 18;
+    /**
+     * 指定自动回连的蓝牙 MAC（17 字节 ASCII，形如 {@code AA:BB:CC:DD:EE:FF}）。
+     *
+     * <p>与 {@code 8 / 1002} 的区别：1002 让盒子在已配对列表里自己挑，
+     * 17 则由主机点名某一台手机，多机配对时用它保证连上想要的那台。
+     */
+    private static final int CMD_AUTO_CONN_BT_ADDR = 17;
     private static final int CMD_ENABLE_CRYPT = 240;
     /** 盒子固件升级进度（4 字节 int，0~100）。 */
     private static final int CMD_UPDATE_PROGRESS = 177;
@@ -39,6 +46,14 @@ public final class BoxProtocolSession implements AutoCloseable {
     private static final int CMD_UPDATE = 187;
     /** 盒子信息上报（JSON），含 uuid / MFD / productType / fileName。 */
     private static final int CMD_BOX_INFO = 25;
+    /**
+     * 要求盒子重启（零负载）。
+     *
+     * <p>原版 {@code o__oOo0oO0_oO0_()} 只在读帧出错时用它做恢复；这里额外用于
+     * 固件升级成功后主动重启。原版该类命令依赖 {@code len == 0} 提前返回，
+     * 因此帧头始终是明文 magic {@code 0x55AA55AA}，见 {@link #createRebootFrame()}。
+     */
+    private static final int CMD_BOX_REBOOT = 206;
     /** 盒子固件升级包在盒子侧的落盘路径。 */
     public static final String FIRMWARE_BOX_PATH = "/tmp/Auto_Box_Update.img\0";
     /** 与盒子固件升级包大小上限一致（50MB）。 */
@@ -51,10 +66,42 @@ public final class BoxProtocolSession implements AutoCloseable {
     private static final long HEARTBEAT_INTERVAL_MS = 2000L;
     // Short grace period so the box can reconnect a paired phone on its own first.
     private static final long AUTO_CONNECT_DELAY_MS = 2000L;
+    /**
+     * 升级成功后等待多久再下发重启。留出时间让盒子把 187 状态与 177 进度发完，
+     * 否则重启指令可能抢在成功回报之前把 USB 掐断。
+     */
+    private static final long UPGRADE_REBOOT_DELAY_MS = 1500L;
+
+    /**
+     * 盒子 {@code CMD_BLUETOOTH_PAIR_LIST}(18) 里的一条已配对手机。
+     *
+     * <p>原始行格式为「17 字符 MAC + 设备名」，见 {@link #parseBluetoothPairList(String)}。
+     */
+    public static final class PairedDevice {
+        private final String mac;
+        private final String name;
+
+        PairedDevice(String mac, String name) {
+            this.mac = mac;
+            this.name = name;
+        }
+
+        public String getMac() {
+            return mac;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        @Override
+        public String toString() {
+            return name == null || name.isEmpty() ? mac : name + "（" + mac + "）";
+        }
+    }
 
     public interface Listener {
-        default void onBoxName(boolean bluetooth, String name) { }
-        default void onError(String message, Throwable error) { }
+        default void onBoxName(boolean bluetooth, String name) { }        default void onError(String message, Throwable error) { }
         default void onNavigationData(String data) { }
         default void onNavigationUpdate(org.json.JSONObject data) { }
         default void onNavigationEnded() { }
@@ -72,6 +119,10 @@ public final class BoxProtocolSession implements AutoCloseable {
         }
 
         default void onBoxVersion(String version) {
+        }
+
+        /** 盒子上报的已配对手机列表（CMD 18），mac 为 {@code AA:BB:CC:DD:EE:FF} 形式。 */
+        default void onPairedDevices(List<PairedDevice> devices) {
         }
 
         /** 盒子固件升级进度，0~100。 */
@@ -115,6 +166,7 @@ public final class BoxProtocolSession implements AutoCloseable {
     private volatile boolean heartbeatStarted;
     private boolean boxSupportsAutoConnect;
     private int pairedDeviceCount;
+    private volatile List<PairedDevice> pairedDevices = Collections.emptyList();
     private int phoneType = -2;
     private int phonePhase = -1;
     private int microphoneDecodeType = -1;
@@ -125,6 +177,10 @@ public final class BoxProtocolSession implements AutoCloseable {
     private volatile List<BoxSetting> boxSettings = Collections.emptyList();
     private volatile boolean autoPlayMusic;
     private boolean autoPlaySent;
+    /** 固件升级成功后是否主动下发重启（cmd 206）。 */
+    private volatile boolean rebootAfterUpgrade = true;
+    /** 本会话是否已经安排过重启，避免重复下发。 */
+    private boolean rebootRequested;
     private volatile String boxUuid = "";
     private volatile String boxManufacturer = "";
     private volatile String boxProductType = "";
@@ -516,6 +572,9 @@ public final class BoxProtocolSession implements AutoCloseable {
                         if (listener != null) {
                             listener.onFirmwareStatus(status);
                         }
+                        if (shouldRebootAfterUpgrade(status)) {
+                            scheduleRebootAfterUpgrade();
+                        }
                     }
                 } else if (packet.command == CMD_BOX_INFO) {
                     handleBoxInfo(packet.payload);
@@ -692,6 +751,76 @@ public final class BoxProtocolSession implements AutoCloseable {
             if (listener != null) listener.onError("固件下发失败", exception);
             return false;
         }
+    }
+
+    /** 设置升级成功后是否主动重启盒子，默认开启。 */
+    public void setRebootAfterUpgrade(boolean enabled) {
+        rebootAfterUpgrade = enabled;
+    }
+
+    /**
+     * 检查某个 {@code CMD_UPDATE} 状态是否属于「升级成功」，需要主动重启盒子。
+     *
+     * <p>{@code 2} 为普通升级成功，{@code 6} 为 OTA 升级成功。
+     */
+    static boolean shouldRebootAfterUpgrade(int status) {
+        return status == 2 || status == 6;
+    }
+
+    /**
+     * 构造重启命令帧（{@code CMD_BOX_REBOOT} 206）。
+     *
+     * <p>与其它命令不同，这一帧必须保持原版的明文形态：原版
+     * {@code oO0O00o._oOoOOO()} 在负载长度为 0 时直接返回，既不调用 native 加密，
+     * 也不会把 magic 切成 {@code 0x55BB55BB}。这样即使 {@code libnx1} 未加载或
+     * 加密状态已失步，重启指令依然能送达。
+     */
+    static byte[] createRebootFrame() {
+        return ProtocolFrame.encodeLegacy(CMD_BOX_REBOOT, new byte[0]);
+    }
+
+    /**
+     * 立即要求盒子重启。
+     *
+     * @return 指令是否写入 USB（不代表盒子已经重启）
+     */
+    public boolean rebootBox() {
+        if (closed) {
+            return false;
+        }
+        try {
+            writeFrame(createRebootFrame());
+            publish(protocolReady
+                    ? "已向盒子发送重启指令（CMD 206）"
+                    : "已向盒子发送重启指令（CMD 206，协议未就绪时也可发送）");
+            return true;
+        } catch (IOException exception) {
+            // 盒子自行重启时 USB 已断开，写失败属正常情况，不要当成错误弹窗。
+            publish("盒子重启指令未送达：" + exception.getMessage()
+                    + "（盒子可能已在自行重启）");
+            return false;
+        }
+    }
+
+    /** 升级成功后延时下发重启，避免抢在成功回报之前掐断 USB。 */
+    private void scheduleRebootAfterUpgrade() {
+        if (!rebootAfterUpgrade || rebootRequested || closed) {
+            return;
+        }
+        rebootRequested = true;
+        Thread rebootThread = new Thread(() -> {
+            try {
+                Thread.sleep(UPGRADE_REBOOT_DELAY_MS);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (!closed) {
+                rebootBox();
+            }
+        }, "autoplay-box-reboot");
+        rebootThread.setDaemon(true);
+        rebootThread.start();
     }
 
     static byte[] createCarBrandPayload(int brandId) {
@@ -943,12 +1072,127 @@ public final class BoxProtocolSession implements AutoCloseable {
     }
 
     private void handleBluetoothPairList(byte[] payload) {
-        String pairList = new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
-        pairedDeviceCount = pairList.isEmpty() ? 0 : pairList.split("\\n").length;
+        String pairList = new String(payload, java.nio.charset.StandardCharsets.UTF_8);
+        List<PairedDevice> devices = parseBluetoothPairList(pairList);
+        pairedDevices = Collections.unmodifiableList(devices);
+        pairedDeviceCount = devices.size();
         publishPhoneStatus(pairedDeviceCount == 0
                 ? "没有已配对手机，自动连接不可用"
                 : "已配对手机：" + pairedDeviceCount + " 台");
+        if (listener != null) {
+            listener.onPairedDevices(pairedDevices);
+        }
         maybeAutoConnect();
+    }
+
+    /**
+     * 解析盒子 {@code CMD_BLUETOOTH_PAIR_LIST}(18) 的负载。
+     *
+     * <p>原版格式：每行「17 字符 MAC + 设备名」，行间以 {@code \n} 分隔，
+     * 整体可能带结尾 {@code \0}（原版按 {@code len - 1} 截断）。解析时对
+     * 长度不足 17、MAC 格式非法的行直接丢弃，避免脏数据被当成设备。
+     */
+    static List<PairedDevice> parseBluetoothPairList(String raw) {
+        List<PairedDevice> devices = new ArrayList<>();
+        if (raw == null || raw.isEmpty()) {
+            return devices;
+        }
+        int end = raw.length();
+        while (end > 0 && raw.charAt(end - 1) == '\0') end--;
+        String body = raw.substring(0, end);
+        for (String line : body.split("\\r?\\n")) {
+            if (line.isEmpty()) {
+                continue;
+            }
+            if (line.length() < MAC_LENGTH) {
+                continue;
+            }
+            String mac = line.substring(0, MAC_LENGTH).trim();
+            if (!isValidBluetoothMac(mac)) {
+                continue;
+            }
+            String name = line.substring(MAC_LENGTH).trim();
+            devices.add(new PairedDevice(mac.toUpperCase(java.util.Locale.ROOT), name));
+        }
+        return devices;
+    }
+
+    /** MAC 在协议里固定 17 个 ASCII 字符（{@code AA:BB:CC:DD:EE:FF}）。 */
+    static final int MAC_LENGTH = 17;
+
+    /**
+     * 校验 {@code AA:BB:CC:DD:EE:FF} 形式的蓝牙地址。
+     *
+     * <p>原版 {@code sendAutoConnByBtAddr} 只检查字节数是否为 17，
+     * 这里额外校验字符集，避免把「名字里恰好含 17 个字符」的行发出去。
+     */
+    static boolean isValidBluetoothMac(String mac) {
+        if (mac == null || mac.length() != MAC_LENGTH) {
+            return false;
+        }
+        // 分隔符必须全程一致（盒子用 ':'，用户手输也可能用 '-'）
+        char separator = mac.charAt(2);
+        if (separator != ':' && separator != '-') {
+            return false;
+        }
+        for (int index = 0; index < MAC_LENGTH; index++) {
+            char c = mac.charAt(index);
+            if (index % 3 == 2) {
+                if (c != separator) {
+                    return false;
+                }
+            } else if (Character.digit(c, 16) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 构造 {@code CMD_AUTO_CONN_BT_ADDR}(17) 的 17 字节 ASCII 负载。 */
+    static byte[] createAutoConnectAddressPayload(String mac) {
+        if (!isValidBluetoothMac(mac)) {
+            throw new IllegalArgumentException("蓝牙地址格式不正确：" + mac);
+        }
+        // 统一成盒子认识的大写 ':' 形式，避免用户用 '-' 输入时盒子无法匹配
+        String normalized = mac.toUpperCase(java.util.Locale.ROOT).replace('-', ':');
+        return normalized.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    }
+
+    /**
+     * 点名让盒子去连这一台手机（{@code CMD_AUTO_CONN_BT_ADDR} 17）。
+     *
+     * <p>与 {@link #maybeAutoConnect()} 的 {@code 8 / 1002} 互补：1002 让盒子在
+     * 已配对列表里自己挑，17 则指定具体 MAC。
+     *
+     * @return 指令是否写入 USB（不代表手机已连上）
+     */
+    public boolean requestAutoConnectTo(String mac) {
+        if (closed || !protocolReady) {
+            publish("指定回连失败：协议未就绪");
+            return false;
+        }
+        byte[] payload;
+        try {
+            payload = createAutoConnectAddressPayload(mac);
+        } catch (IllegalArgumentException exception) {
+            publish("指定回连失败：" + exception.getMessage());
+            return false;
+        }
+        try {
+            writeFrame(ProtocolFrame.encode(CMD_AUTO_CONN_BT_ADDR, payload, cryptEnabled, nonce));
+            publish("已请求盒子回连指定手机：" + mac.toUpperCase(java.util.Locale.ROOT));
+            autoConnectRequested = true;
+            return true;
+        } catch (IOException exception) {
+            publish("指定回连失败：" + exception.getMessage());
+            if (listener != null) listener.onError("指定回连失败", exception);
+            return false;
+        }
+    }
+
+    /** 盒子上报的已配对手机列表，未收到 cmd 18 时为空。 */
+    public List<PairedDevice> getPairedDevices() {
+        return pairedDevices;
     }
 
     private void maybeAutoConnect() {

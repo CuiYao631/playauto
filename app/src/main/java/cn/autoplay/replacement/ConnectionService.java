@@ -542,6 +542,10 @@ public final class ConnectionService extends Service {
             @Override public void onBoxVersion(String version) {
                 dispatch(epoch, () -> { boxVersion = version; notifyClient(); });
             }
+            @Override public void onPairedDevices(
+                    java.util.List<BoxProtocolSession.PairedDevice> devices) {
+                dispatch(epoch, ConnectionService.this::notifyClient);
+            }
             @Override public void onFirmwareProgress(int percent) {
                 dispatch(epoch, () -> {
                     firmwareProgress = percent;
@@ -624,9 +628,53 @@ public final class ConnectionService extends Service {
         return current.sendFirmwareImage(image);
     }
 
+    /**
+     * 主动要求盒子重启（{@code CMD_BOX_REBOOT} 206）。
+     *
+     * <p>固件升级成功后由协议层自动调用；设置页也提供手动入口，
+     * 用于盒子卡死或需要验证命令是否生效的场景。
+     */
+    boolean rebootBox() {
+        BoxProtocolSession current = session;
+        if (current == null) {
+            setBoxStatus("盒子：未连接，无法发送重启指令");
+            return false;
+        }
+        // 升级过程中（187=1/5）重启盒子会损坏固件，必须拦住。
+        if (firmwareStatus == 1 || firmwareStatus == 5) {
+            setBoxStatus("盒子：固件升级中，不能重启");
+            return false;
+        }
+        return current.rebootBox();
+    }
+
+    /**
+     * 点名让盒子回连某台已配对手机（{@code CMD_AUTO_CONN_BT_ADDR} 17）。
+     *
+     * @param mac 形如 {@code AA:BB:CC:DD:EE:FF} 的蓝牙地址
+     */
+    boolean autoConnectToDevice(String mac) {
+        BoxProtocolSession current = session;
+        if (current == null) {
+            setBoxStatus("盒子：未连接，无法指定回连手机");
+            return false;
+        }
+        return current.requestAutoConnectTo(mac);
+    }
+
+    /** 盒子上报的已配对手机列表，界面用于「指定回连手机」的选择。 */
+    java.util.List<BoxProtocolSession.PairedDevice> pairedDevices() {
+        BoxProtocolSession current = session;
+        if (current == null) {
+            return java.util.Collections.emptyList();
+        }
+        return current.getPairedDevices();
+    }
+
     void syncCarLogo() {
         BoxProtocolSession current = session;
-        if (current == null) return;        String path = prefs().getString("CarPlayOEMIconPath", CarLogoUpload.DEFAULT_PATH);
+        if (current == null) return;
+        String path = prefs().getString("CarPlayOEMIconPath", CarLogoUpload.DEFAULT_PATH);
         new Thread(() -> {
             try {
                 CarLogoUpload.send(this, current, path);
@@ -655,6 +703,7 @@ public final class ConnectionService extends Service {
         current.setNightMode(currentNightSetting());
         current.setMicSource(0);
         current.setAutoPlayMusic(prefs.getBoolean("auto_play_music", false));
+        current.setRebootAfterUpgrade(prefs.getBoolean("reboot_after_upgrade", true));
         List<BoxSetting> settings = new ArrayList<>();
         settings.add(BoxSetting.dashboardInfo());
         settings.add(BoxSetting.integer("drivePosition", 0));

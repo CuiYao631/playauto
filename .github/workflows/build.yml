@@ -66,11 +66,40 @@ jobs:
           echo "tag=v$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "已解析版本：$VERSION_NAME (versionCode $VERSION_CODE)"
 
+      - name: Generate release notes
+        id: notes
+        env:
+          # push 事件直接给出本次提交的完整信息（标题 + 正文）
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -eu
+          NOTES="$RUNNER_TEMP/notes.txt"
+
+          # Release 描述与应用内更新弹窗都以本次提交信息为准
+          if [ -n "${COMMIT_MESSAGE:-}" ]; then
+              printf '%s\n' "$COMMIT_MESSAGE" > "$NOTES.raw"
+          else
+              git log -1 --pretty=%B > "$NOTES.raw"
+          fi
+
+          # 去掉行尾空白与首尾空行，其余原样保留，保证与提交信息一致
+          # 注意：awk 内不能把变量命名为 index（与内置函数冲突）
+          sed -e 's/[[:space:]]*$//' "$NOTES.raw" \
+              | awk 'NF { started = 1 } started { lines[++count] = $0; if (NF) last = count }
+                     END { for (i = 1; i <= last; i++) print lines[i] }' \
+              > "$NOTES"
+
+          if [ ! -s "$NOTES" ]; then
+              echo "维护与稳定性改进。" > "$NOTES"
+          fi
+
+          echo "本次更新说明："
+          cat "$NOTES"
+
       - name: Create tag and release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
-          VERSION_CODE: ${{ steps.version.outputs.code }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -eu
@@ -82,10 +111,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "PlayAuto $VERSION"
           git push origin "$TAG"
+
+          # 描述内容就是提交信息本身，应用内更新弹窗会原样展示
           gh release create "$TAG" \
               "build/manual/AutoPlayReplacement-debug.apk#AutoPlayReplacement-debug.apk" \
               --title "PlayAuto $VERSION" \
-              --notes "构建版本 $VERSION (versionCode $VERSION_CODE)。下载后直接覆盖安装即可升级，应用内「检查更新」也会指向本 Release。"
+              --notes-file "$RUNNER_TEMP/notes.txt"
 
       - name: Sync update.json
         env:
@@ -97,7 +128,8 @@ jobs:
           jq --arg version "$VERSION" \
              --argjson code "$VERSION_CODE" \
              --arg url "$URL" \
-             '.version = $version | .versionCode = $code | .url = $url' \
+             --rawfile notes "$RUNNER_TEMP/notes.txt" \
+             '.version = $version | .versionCode = $code | .url = $url | .notes = $notes' \
              update.json > update.json.tmp
           mv update.json.tmp update.json
 

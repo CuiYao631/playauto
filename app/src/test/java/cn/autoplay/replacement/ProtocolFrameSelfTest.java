@@ -62,6 +62,52 @@ public final class ProtocolFrameSelfTest {
                 "fallback respects lower versionCode");
         check(!UpdateChecker.isNewer("2026.11.17.0900", 1, "custom-build", 4),
                 "falls back to versionCode when current format is unknown");
+
+        // 更新弹窗正文：使用 update.json 的真实更新说明，并做整理与兜底
+        check(UpdateChecker.formatNotes("- 修复 A\n- 优化 B").equals("- 修复 A\n- 优化 B"),
+                "notes preserved");
+        check(UpdateChecker.formatNotes("- 修复 A\\n- 优化 B").equals("- 修复 A\n- 优化 B"),
+                "escaped newlines restored");
+        check(UpdateChecker.formatNotes("  \n\n - 修复 A \n\n\n- 优化 B \n ").equals("- 修复 A\n- 优化 B"),
+                "blank lines and padding trimmed");
+        check(UpdateChecker.formatNotes("").equals(UpdateChecker.DEFAULT_NOTES),
+                "empty notes fall back to default");
+        check(UpdateChecker.formatNotes("   \n  ").equals(UpdateChecker.DEFAULT_NOTES),
+                "whitespace-only notes fall back to default");
+        check(UpdateChecker.formatNotes(null).equals(UpdateChecker.DEFAULT_NOTES),
+                "null notes fall back to default");
+
+        // Release 描述与提交信息一致，弹窗正文不得改动 Markdown 等原有内容
+        check(UpdateChecker.formatNotes("## 更新内容\n- 修复 A").equals("## 更新内容\n- 修复 A"),
+                "markdown headings preserved");
+        check(UpdateChecker.formatNotes("- 修复 A\n\n---\n\n- 优化 B").equals("- 修复 A\n---\n- 优化 B"),
+                "horizontal rule preserved, blank lines collapsed");
+        check(UpdateChecker.formatNotes("修复：\n\n1. A\n2. B").equals("修复：\n1. A\n2. B"),
+                "multi-line commit body preserved");
+
+        // tag 去前缀
+        check(UpdateChecker.normalizeTag("v2026.11.16.1444").equals("2026.11.16.1444"),
+                "v prefix stripped");
+        check(UpdateChecker.normalizeTag("2026.11.16.1444").equals("2026.11.16.1444"),
+                "plain tag preserved");
+        check(UpdateChecker.normalizeTag(" version ").equals("version"),
+                "non-numeric prefix kept");
+        check(UpdateChecker.normalizeTag(null).isEmpty(), "null tag becomes empty");
+
+        // Release 资产挑选（android.jar 的 org.json 是桩实现，故测试纯函数版本）
+        check(UpdateChecker.pickApkUrl(
+                new String[]{"notes.txt", "AutoPlayReplacement-debug.apk"},
+                new String[]{"u1", "u2"}).equals("u2"), "exact apk asset preferred");
+        check(UpdateChecker.pickApkUrl(
+                new String[]{"other.apk"}, new String[]{"u3"}).equals("u3"),
+                "fallback to any apk asset");
+        check(UpdateChecker.pickApkUrl(new String[]{}, new String[]{}).isEmpty(),
+                "no assets yields empty url");
+        check(UpdateChecker.pickApkUrl(null, null).isEmpty(),
+                "missing assets yields empty url");
+        check(UpdateChecker.pickApkUrl(
+                new String[]{"a.txt"}, new String[]{""}).isEmpty(),
+                "asset without url skipped");
     }
 
     private static void testFrameRateNormalization() {

@@ -18,6 +18,7 @@ import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -1004,11 +1005,37 @@ public final class MainActivity extends Activity {
 
     // ---- 在线更新 ----
 
+    /** 首选通道：GitHub Releases API，弹窗正文直接展示 Release 的描述内容。 */
+    private static final String UPDATE_RELEASE_API_URL =
+            "https://api.github.com/repos/CuiYao631/playauto/releases/latest";
+
+    /** 备用通道：Release 接口限流或不可用时退回仓库内的版本清单。 */
     private static final String UPDATE_CHECK_URL =
             "https://raw.githubusercontent.com/CuiYao631/playauto/main/update.json";
 
     void showUpdateCheck() {
         Toast.makeText(this, "正在检查更新...", Toast.LENGTH_SHORT).show();
+        UpdateChecker.checkLatestRelease(UPDATE_RELEASE_API_URL, appVersion(), appVersionCode(),
+                new UpdateChecker.Callback() {
+                    @Override
+                    public void onUpdateAvailable(UpdateChecker.UpdateInfo info) {
+                        showUpdateDialog(info);
+                    }
+
+                    @Override
+                    public void onNoUpdate() {
+                        Toast.makeText(MainActivity.this, "已是最新版本", Toast.LENGTH_SHORT).show();
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        Log.w("MainActivity", "Release 接口不可用，改用版本清单：" + message);
+                        checkUpdateManifest();
+                    }
+                });
+    }
+
+    private void checkUpdateManifest() {
         UpdateChecker.check(UPDATE_CHECK_URL, appVersion(), appVersionCode(),
                 new UpdateChecker.Callback() {
                     @Override
@@ -1029,7 +1056,8 @@ public final class MainActivity extends Activity {
     }
 
     private void showUpdateDialog(UpdateChecker.UpdateInfo info) {
-        String message = "发现新版本 " + info.version + "\n\n" + info.notes;
+        String message = "发现新版本 " + info.version
+                + "\n\n更新内容：\n" + UpdateChecker.formatNotes(info.notes);
         new AlertDialog.Builder(this)
                 .setTitle("软件更新")
                 .setMessage(message)

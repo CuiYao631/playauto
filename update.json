@@ -1,6 +1,6 @@
 {
-  "version": "2026.11.16.1510",
-  "versionCode": 26111615,
+  "version": "2026.11.16.1706",
+  "versionCode": 26111617,
   "url": "https://github.com/CuiYao631/playauto/releases/latest/download/AutoPlayReplacement-debug.apk",
-  "notes": "1.更新了新的功能\n2.修复了一部分BUG\n"
+  "notes": "1.添加了连接指定手机的功能\n2.添加了盒子重启的功能\n3.修复了一些BUG\n"
 }

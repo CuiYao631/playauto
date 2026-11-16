@@ -33,6 +33,16 @@ public final class BoxProtocolSession implements AutoCloseable {
     private static final int USB_WRITE_CHUNK_SIZE = 16384;
     private static final int CMD_BLUETOOTH_PAIR_LIST = 18;
     private static final int CMD_ENABLE_CRYPT = 240;
+    /** 盒子固件升级进度（4 字节 int，0~100）。 */
+    private static final int CMD_UPDATE_PROGRESS = 177;
+    /** 盒子固件升级状态（4 字节 int）。 */
+    private static final int CMD_UPDATE = 187;
+    /** 盒子信息上报（JSON），含 uuid / MFD / productType / fileName。 */
+    private static final int CMD_BOX_INFO = 25;
+    /** 盒子固件升级包在盒子侧的落盘路径。 */
+    public static final String FIRMWARE_BOX_PATH = "/tmp/Auto_Box_Update.img\0";
+    /** 与盒子固件升级包大小上限一致（50MB）。 */
+    public static final int MAX_FIRMWARE_SIZE = 50 * 1024 * 1024;
     private static final int MAX_PAYLOAD_SIZE = 16 * 1024 * 1024;
     private static final int READ_TIMEOUT_MS = 250;
     // The original app re-sends the open command every second until the box answers.
@@ -62,6 +72,23 @@ public final class BoxProtocolSession implements AutoCloseable {
         }
 
         default void onBoxVersion(String version) {
+        }
+
+        /** 盒子固件升级进度，0~100。 */
+        default void onFirmwareProgress(int percent) {
+        }
+
+        /** 盒子固件升级状态，对应 CMD_UPDATE：1 开始、2 成功、3 失败、5/6/7 OTA。 */
+        default void onFirmwareStatus(int status) {
+        }
+
+        /**
+         * 盒子信息上报（CMD_BOX_INFO 25），用于固件检查请求里的 uuid / mfd / model / fwn。
+         *
+         * @param firmwareName 盒子建议的固件文件名，已按 productType 推导
+         */
+        default void onBoxInfo(String uuid, String manufacturer, String productType,
+                               String firmwareName) {
         }
 
         default void onSessionEnded() {
@@ -98,6 +125,10 @@ public final class BoxProtocolSession implements AutoCloseable {
     private volatile List<BoxSetting> boxSettings = Collections.emptyList();
     private volatile boolean autoPlayMusic;
     private boolean autoPlaySent;
+    private volatile String boxUuid = "";
+    private volatile String boxManufacturer = "";
+    private volatile String boxProductType = "";
+    private volatile String boxFirmwareName = "";
     private final ThreadPoolExecutor touchExecutor = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(16),
@@ -469,6 +500,25 @@ public final class BoxProtocolSession implements AutoCloseable {
                     handleCarPlayStatus(packet.payload);
                 } else if (packet.command == CMD_BLUETOOTH_PAIR_LIST) {
                     handleBluetoothPairList(packet.payload);
+                } else if (packet.command == CMD_UPDATE_PROGRESS) {
+                    if (packet.payload.length >= 4) {
+                        int percent = ByteBuffer.wrap(packet.payload)
+                                .order(ByteOrder.LITTLE_ENDIAN).getInt(0);
+                        if (percent >= 0 && percent <= 100 && listener != null) {
+                            listener.onFirmwareProgress(percent);
+                        }
+                    }
+                } else if (packet.command == CMD_UPDATE) {
+                    if (packet.payload.length >= 4) {
+                        int status = ByteBuffer.wrap(packet.payload)
+                                .order(ByteOrder.LITTLE_ENDIAN).getInt(0);
+                        publish("盒子固件升级状态：" + describeFirmwareStatus(status));
+                        if (listener != null) {
+                            listener.onFirmwareStatus(status);
+                        }
+                    }
+                } else if (packet.command == CMD_BOX_INFO) {
+                    handleBoxInfo(packet.payload);
                 } else if (packet.command == CMD_VIDEO_FRAME && protocolReady) {
                     boolean hasTimestamp = boxSoftwareVersion != null
                             && boxSoftwareVersion.compareTo("2024.12.13.1130") >= 0;
@@ -559,6 +609,89 @@ public final class BoxProtocolSession implements AutoCloseable {
                 .putInt(data.length)
                 .put(data)
                 .array();
+    }
+
+    static String describeFirmwareStatus(int status) {
+        switch (status) {
+            case 1: return "开始升级";
+            case 2: return "升级成功";
+            case 3: return "升级失败";
+            case 5: return "OTA 开始";
+            case 6: return "OTA 成功";
+            case 7: return "OTA 失败";
+            default: return "未知状态 " + status;
+        }
+    }
+
+    /**
+     * 解析 {@code CMD_BOX_INFO}(25) 上报的 JSON。
+     *
+     * <p>字段名与原版一致：{@code uuid}、{@code MFD}（厂商）、{@code productType}（型号）、
+     * {@code fileName}（固件包名）。{@code fileName} 缺失时按 {@code productType} 推导。
+     */
+    private void handleBoxInfo(byte[] payload) {
+        if (payload == null || payload.length < 4) {
+            return;
+        }
+        try {
+            String text = new String(payload, 0, payload.length,
+                    java.nio.charset.StandardCharsets.UTF_8);
+            int nul = text.indexOf('\0');
+            if (nul >= 0) text = text.substring(0, nul);
+            org.json.JSONObject json = new org.json.JSONObject(text);
+
+            String uuid = json.optString("uuid", "");
+            String manufacturer = json.optString("MFD", "");
+            String productType = json.optString("productType", "");
+            String firmwareName = json.optString("fileName", "");
+            if (firmwareName.isEmpty()) {
+                if ("Auto_Box".equals(productType)) {
+                    firmwareName = "Auto_Box_Update.img";
+                } else if ("A15HW".equals(productType)) {
+                    firmwareName = "A15H_Update.img";
+                }
+            }
+
+            boxUuid = uuid;
+            boxManufacturer = manufacturer;
+            boxProductType = productType;
+            boxFirmwareName = firmwareName;
+
+            publish("盒子信息：uuid=" + uuid + "，厂商=" + manufacturer
+                    + "，型号=" + productType + "，固件包=" + firmwareName);
+            if (listener != null) {
+                listener.onBoxInfo(uuid, manufacturer, productType, firmwareName);
+            }
+        } catch (org.json.JSONException exception) {
+            Log.w("BoxProtocolSession", "CMD_BOX_INFO 解析失败", exception);
+        }
+    }
+
+    /**
+     * 把固件镜像写入盒子 {@code /tmp/Auto_Box_Update.img}，随后盒子会自行开始升级，
+     * 并通过 177/187 两条命令回报进度与结果。
+     *
+     * @param image 固件镜像原始字节（{@code Auto_Box_Update.img}）
+     * @return 是否成功下发
+     */
+    public boolean sendFirmwareImage(byte[] image) {
+        if (closed || !protocolReady || image == null || image.length == 0) {
+            publish("固件下发被拒绝：协议未就绪或镜像为空");
+            return false;
+        }
+        if (image.length > MAX_FIRMWARE_SIZE) {
+            publish("固件包过大：" + image.length + " 字节（上限 50MB）");
+            return false;
+        }
+        try {
+            uploadFile(FIRMWARE_BOX_PATH, image);
+            publish("固件已下发到盒子，等待盒子回报升级进度");
+            return true;
+        } catch (IOException exception) {
+            publish("固件下发失败：" + exception.getMessage());
+            if (listener != null) listener.onError("固件下发失败", exception);
+            return false;
+        }
     }
 
     static byte[] createCarBrandPayload(int brandId) {

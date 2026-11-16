@@ -22,6 +22,290 @@ public final class ProtocolFrameSelfTest {
         testOriginalVideoOptions();
         testVendorKeys();
         testHeadlightNightMode();
+        testBoxFirmwarePayload();
+        testSteeringKeyCodeParsing();
+        testFrameRateNormalization();
+        testNightModeSelection();
+        testUpdateComparison();
+    }
+
+    private static void testUpdateComparison() {
+        // 版本号格式识别：构建脚本产出的 YYYY.MM.DD.HHMM
+        check(UpdateChecker.isTimestampVersion("2026.11.16.1418"), "timestamp version recognized");
+        check(!UpdateChecker.isTimestampVersion("2026.11.16"), "short version rejected");
+        check(!UpdateChecker.isTimestampVersion("2026-11-16.1418"), "wrong separator rejected");
+        check(!UpdateChecker.isTimestampVersion("2026.11.16.14a8"), "non-digit rejected");
+        check(!UpdateChecker.isTimestampVersion(null), "null version rejected");
+        check(!UpdateChecker.isTimestampVersion(""), "empty version rejected");
+
+        // 回归：本地 2026.11.16 被误判为需要升级到 2026.11.13（远程 versionCode 更大）
+        check(!UpdateChecker.isNewer("2026.11.13.1700", 2, "2026.11.16.1418", 1),
+                "older remote version must not trigger update even with larger versionCode");
+        // 正常升级
+        check(UpdateChecker.isNewer("2026.11.17.0900", 3, "2026.11.16.1418", 1),
+                "newer remote version triggers update");
+        // 完全相同
+        check(!UpdateChecker.isNewer("2026.11.16.1418", 2, "2026.11.16.1418", 2),
+                "identical versions report no update");
+        // 同一天不同分钟
+        check(UpdateChecker.isNewer("2026.11.16.1430", 2, "2026.11.16.1418", 2),
+                "later minute same day triggers update");
+        check(!UpdateChecker.isNewer("2026.11.16.1400", 2, "2026.11.16.1418", 2),
+                "earlier minute same day reports no update");
+        // 跨年
+        check(UpdateChecker.isNewer("2027.01.01.0000", 1, "2026.12.31.2359", 1),
+                "year rollover compares correctly");
+        // 版本号格式异常时退回 versionCode 比较
+        check(UpdateChecker.isNewer("1.2.3", 5, "2026.11.16.1418", 4),
+                "falls back to versionCode when remote format is unknown");
+        check(!UpdateChecker.isNewer("1.2.3", 3, "2026.11.16.1418", 4),
+                "fallback respects lower versionCode");
+        check(!UpdateChecker.isNewer("2026.11.17.0900", 1, "custom-build", 4),
+                "falls back to versionCode when current format is unknown");
+    }
+
+    private static void testFrameRateNormalization() {
+        // 设置页只提供 30 / 60，历史九档取值必须收敛，否则选项下标查找会抛异常。
+        check(java.util.Arrays.equals(VideoOptions.SELECTABLE_FRAME_RATES, new int[]{60, 30}),
+                "settings only expose 60 and 30 fps");
+        check(VideoOptions.normalizeFrameRate(60) == 60, "60 stays 60");
+        check(VideoOptions.normalizeFrameRate(30) == 30, "30 stays 30");
+        check(VideoOptions.normalizeFrameRate(55) == 60, "55 collapses to 60");
+        check(VideoOptions.normalizeFrameRate(50) == 60, "50 collapses to 60");
+        check(VideoOptions.normalizeFrameRate(45) == 60, "45 collapses to 60");
+        check(VideoOptions.normalizeFrameRate(40) == 30, "40 collapses to 30");
+        check(VideoOptions.normalizeFrameRate(35) == 30, "35 collapses to 30");
+        check(VideoOptions.normalizeFrameRate(25) == 30, "25 collapses to 30");
+        check(VideoOptions.normalizeFrameRate(20) == 30, "20 collapses to 30");
+        check(VideoOptions.normalizeFrameRate(0) == 30, "unset collapses to default 30");
+        check(VideoOptions.normalizeFrameRate(-1) == 30, "negative collapses to default");
+        // 归一化后的值必须能通过 effectiveFrameRate 校验
+        for (int raw : new int[]{20, 25, 30, 35, 40, 45, 50, 55, 60}) {
+            int normalized = VideoOptions.normalizeFrameRate(raw);
+            check(VideoOptions.effectiveFrameRate(VideoOptions.HARDWARE, normalized) == normalized,
+                    "normalized " + raw + " is accepted by effectiveFrameRate");
+        }
+        // 软解仍固定 25，不受归一化影响
+        check(VideoOptions.effectiveFrameRate(VideoOptions.SOFTWARE, 60) == 25,
+                "software decoder still negotiates 25fps");
+    }
+
+    private static void testNightModeSelection() {
+        // 夜间模式只暴露「跟随手机(2)」「大灯联动(3)」，历史值 0/1 需能安全回退。
+        int[] values = {2, 3};
+        check(SettingsScreens.selectedValueIndex(values, 2, 0) == 0, "follow-phone maps to index 0");
+        check(SettingsScreens.selectedValueIndex(values, 3, 0) == 1, "headlight maps to index 1");
+        check(SettingsScreens.selectedValueIndex(values, 0, 0) == 0, "legacy 0 falls back to default");
+        check(SettingsScreens.selectedValueIndex(values, 1, 0) == 0, "legacy 1 falls back to default");
+        check(SettingsScreens.selectedValueIndex(values, -5, 0) == 0, "unknown value falls back");
+        check(SettingsScreens.selectedValueIndex(values, 99, 1) == 1, "unknown value uses given default");
+    }
+
+    private static void testSteeringKeyCodeParsing() {
+        String androidPrefix = "steering_key_";
+        // 正常键
+        check(SettingsScreens.parseAndroidKeyCode("steering_key_25", androidPrefix) == 25,
+                "plain keycode suffix parses");
+        check(SettingsScreens.parseAndroidKeyCode("steering_key_0", androidPrefix) == 0,
+                "zero keycode parses");
+        // 长按槽位：键码正确解析且标记为长按
+        SettingsScreens.AndroidBinding held =
+                SettingsScreens.parseAndroidBinding("steering_key_long_25", androidPrefix);
+        check(held != null && held.keyCode == 25 && held.longPress,
+                "long_ suffix parses as long-press binding");
+        SettingsScreens.AndroidBinding single =
+                SettingsScreens.parseAndroidBinding("steering_key_25", androidPrefix);
+        check(single != null && !single.longPress, "plain suffix is single press");
+        // 回归：曾因 Integer.parseInt("long_25") 抛异常闪退
+        check(SettingsScreens.parseAndroidKeyCode("steering_key_long_25", androidPrefix) == 25,
+                "legacy long_ suffix no longer throws");
+        check(SettingsScreens.parseAndroidBinding("steering_key_long_", androidPrefix) == null,
+                "long_ without keycode returns null");
+        check(SettingsScreens.parseAndroidBinding("steering_key_long_ab", androidPrefix) == null,
+                "long_ with letters returns null");
+        check(SettingsScreens.parseAndroidKeyCode("steering_key_", androidPrefix) == null,
+                "empty suffix returns null");
+        check(SettingsScreens.parseAndroidKeyCode("steering_key_25a", androidPrefix) == null,
+                "trailing letter returns null");
+        check(SettingsScreens.parseAndroidKeyCode("steering_key_2 5", androidPrefix) == null,
+                "embedded space returns null");
+        check(SettingsScreens.parseAndroidKeyCode("steering_key_99999999999", androidPrefix) == null,
+                "overflowing suffix returns null instead of throwing");
+        // 前缀不匹配
+        check(SettingsScreens.parseAndroidKeyCode("steering_vendor_25", androidPrefix) == null,
+                "mismatched prefix returns null");
+        check(SettingsScreens.parseAndroidKeyCode(null, androidPrefix) == null,
+                "null key returns null");
+        check(SettingsScreens.parseAndroidKeyCode("steering_key_25", null) == null,
+                "null prefix returns null");
+        // 厂家协议前缀
+        check(SettingsScreens.parseAndroidKeyCode("steering_cs35plus_key_66",
+                        "steering_cs35plus_key_") == 66,
+                "cs35plus prefix parses");
+        check(SettingsScreens.parseAndroidKeyCode("steering_cs35plus_vendor_long_25",
+                        "steering_cs35plus_key_") == null,
+                "vendor key does not match android prefix");
+
+        // 长按阈值与键名构造
+        check(SteeringProtocol.LONG_PRESS_MS == 800L, "long press threshold is 800ms");
+        check(SteeringProtocol.androidBindingSuffix(25, false).equals("25"),
+                "single binding suffix is bare keycode");
+        check(SteeringProtocol.androidBindingSuffix(25, true).equals("long_25"),
+                "long binding suffix carries long_ marker");
+
+        testSteeringActionResolution();
+    }
+
+    private static void testSteeringActionResolution() {
+        int home = 200;
+        int siri = 10003;
+        // 用户场景：单击主页、长按 Siri
+        check(SteeringProtocol.resolveAction(home, siri, 100) == home,
+                "short press runs single action (home)");
+        check(SteeringProtocol.resolveAction(home, siri, 799) == home,
+                "just below threshold still single action");
+        check(SteeringProtocol.resolveAction(home, siri, 800) == siri,
+                "threshold exactly runs long action (siri)");
+        check(SteeringProtocol.resolveAction(home, siri, 1500) == siri,
+                "held well past threshold runs long action");
+
+        // 只绑定单击：任何时长都只执行单击
+        check(SteeringProtocol.resolveAction(home, -1, 100) == home, "single-only short press");
+        check(SteeringProtocol.resolveAction(home, -1, 2000) == home,
+                "single-only long hold still runs single action");
+
+        // 只绑定长按：短按保持静默，长按才执行
+        check(SteeringProtocol.resolveAction(-1, siri, 100) == -1,
+                "long-only short press stays silent");
+        check(SteeringProtocol.resolveAction(-1, siri, 900) == siri,
+                "long-only long press runs");
+
+        // 都没绑定
+        check(SteeringProtocol.resolveAction(-1, -1, 500) == -1, "no bindings resolves to none");
+
+        testLongPressTimerFlow();
+    }
+
+    /** 按住满阈值立即触发长按，无需松手；触发后松手不再补发单击。 */
+    private static void testLongPressTimerFlow() {
+        int home = 200;
+        int siri = 10003;
+        String key = "key:25";
+        SteeringProtocol.PressState state = new SteeringProtocol.PressState();
+
+        // 场景一：按住满 800ms 立即触发长按（此时尚未松手）
+        state.begin(key, home, siri, 1000);
+        check(state.isPressed(), "state tracks pressed key");
+        check(state.longActionIfDue(1500) == -1, "not due yet at 500ms");
+        check(!state.isLongFired(), "long press not fired before threshold");
+        check(state.longActionIfDue(1800) == siri, "fires siri exactly at 800ms");
+        check(state.isLongFired(), "state records long press fired");
+        check(state.longActionIfDue(2500) == -1, "does not fire twice");
+        // 松手时不再补发单击
+        check(state.finish(2600) == -1, "release after long press sends nothing");
+        check(!state.isPressed(), "state resets after release");
+
+        // 场景二：短按松手，执行单击；计时器后续调用不应再触发
+        state.begin(key, home, siri, 3000);
+        check(state.finish(3200) == home, "short press releases home");
+        check(state.longActionIfDue(4000) == -1, "timer after release does nothing");
+
+        // 场景三：只绑长按，短按保持静默
+        state.begin(key, -1, siri, 5000);
+        check(state.finish(5200) == -1, "long-only short press is silent");
+        // 长按正常触发
+        state.begin(key, -1, siri, 6000);
+        check(state.longActionIfDue(6800) == siri, "long-only long press fires");
+
+        // 场景四：未按下时计时器不应误触发
+        state.reset();
+        check(state.longActionIfDue(9000) == -1, "idle timer does nothing");
+        check(state.finish(9100) == -1, "idle release does nothing");
+
+        // 场景五：不同按键的松手不会误判为当前按下
+        state.begin(key, home, siri, 10000);
+        check(!state.isPressed("VR"), "different key is not treated as pressed");
+        check(state.isPressed(key), "matching key recognized");
+        state.reset();
+
+        testVendorVoiceDefaults();
+    }
+
+    /** 厂家语音键：单击主页、长按 Siri 的默认绑定与学习覆盖。 */
+    private static void testVendorVoiceDefaults() {
+        check(SteeringProtocol.DEFAULT_VR_SINGLE == 200, "default single is home");
+        check(SteeringProtocol.DEFAULT_VR_LONG == 10003, "default long is siri");
+        check(SteeringProtocol.vendorBindingSuffix("VR", false).equals("VR"),
+                "vendor single suffix is bare code");
+        check(SteeringProtocol.vendorBindingSuffix("VR", true).equals("long_VR"),
+                "vendor long suffix carries long_ marker");
+        check(VendorKeys.supportsLongPress("VR"), "voice key supports long press");
+        check(!VendorKeys.supportsLongPress("MAIN"),
+                "MAIN has only press event so no long press");
+        check(!VendorKeys.supportsLongPress("NEXT"), "NEXT keeps single press only");
+        check(!VendorKeys.supportsLongPress("PRE"), "PRE keeps single press only");
+
+        // 状态机同样适用于厂家广播码
+        SteeringProtocol.PressState vendor = new SteeringProtocol.PressState();
+        vendor.begin("VR", SteeringProtocol.DEFAULT_VR_SINGLE,
+                SteeringProtocol.DEFAULT_VR_LONG, 1000);
+        check(vendor.longActionIfDue(1800) == SteeringProtocol.DEFAULT_VR_LONG,
+                "vendor VR long press fires siri at 800ms");
+        vendor.begin("VR", SteeringProtocol.DEFAULT_VR_SINGLE,
+                SteeringProtocol.DEFAULT_VR_LONG, 3000);
+        check(vendor.finish(3150) == SteeringProtocol.DEFAULT_VR_SINGLE,
+                "vendor VR short press sends home");
+    }
+
+    private static void testBoxFirmwarePayload() throws Exception {
+        // 固件下发：cmd 153 的 4+pathLen+4+dataLen 结构
+        byte[] image = new byte[]{0x11, 0x22, 0x33, 0x44};
+        byte[] payload = BoxProtocolSession.createBoxFilePayload(
+                BoxProtocolSession.FIRMWARE_BOX_PATH, image);
+        ByteBuffer buffer = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+        int pathLength = buffer.getInt(0);
+        check(pathLength == BoxProtocolSession.FIRMWARE_BOX_PATH.length(),
+                "firmware path length is written verbatim");
+        byte[] path = new byte[pathLength];
+        buffer.position(4);
+        buffer.get(path);
+        check(new String(path, StandardCharsets.UTF_8)
+                        .equals(BoxProtocolSession.FIRMWARE_BOX_PATH),
+                "firmware path round-trips");
+        int dataLength = buffer.getInt(4 + pathLength);
+        check(dataLength == image.length, "firmware data length matches");
+        check(payload.length == 8 + pathLength + image.length,
+                "firmware payload size is consistent");
+
+        // 50MB 上限
+        check(BoxProtocolSession.MAX_FIRMWARE_SIZE == 50 * 1024 * 1024,
+                "firmware size cap matches original 50MB limit");
+
+        // 187 状态码文案
+        check(BoxProtocolSession.describeFirmwareStatus(1).equals("开始升级"), "187:1 start");
+        check(BoxProtocolSession.describeFirmwareStatus(2).equals("升级成功"), "187:2 success");
+        check(BoxProtocolSession.describeFirmwareStatus(3).equals("升级失败"), "187:3 failure");
+        check(BoxProtocolSession.describeFirmwareStatus(5).equals("OTA 开始"), "187:5 ota start");
+        check(BoxProtocolSession.describeFirmwareStatus(6).equals("OTA 成功"), "187:6 ota success");
+        check(BoxProtocolSession.describeFirmwareStatus(7).equals("OTA 失败"), "187:7 ota failure");
+
+        // checkBox 表单：version 字典序比较即时间序
+        check(BoxFirmwareChecker.compareVersion("2025.03.20.1130", "2024.07.08.0000") > 0,
+                "newer box version sorts after older");
+        check(BoxFirmwareChecker.compareVersion("2024.07.08.0000", "2024.07.08.0000") == 0,
+                "equal versions compare equal");
+
+        java.util.Map<String, String> form = new java.util.LinkedHashMap<>();
+        form.put("code", "36");
+        form.put("ver", "2024.07.08.0000");
+        form.put("mfd", "manstep");
+        String encoded = BoxFirmwareChecker.buildForm(form);
+        check(encoded.equals("code=36&ver=2024.07.08.0000&mfd=manstep"),
+                "checkBox form encodes in insertion order without escaping dots");
+        form.clear();
+        form.put("model", "A B");
+        check(BoxFirmwareChecker.buildForm(form).equals("model=A+B"),
+                "form encodes spaces as plus");
     }
 
     private enum LightStatus { LIGHT_OPEN, LIGHT_CLOSE, LIGHT_INVALID }

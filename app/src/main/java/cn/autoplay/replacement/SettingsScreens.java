@@ -43,12 +43,19 @@ final class SettingsScreens {
             "上一曲 / 接听", "下一曲 / 挂断", "播放 / 暂停", "Siri", "主页", "返回"
     };
     private static final int[] STEERING_COMMANDS = {10001, 10002, 203, 10003, 200, 106};
+    /** 按键日志开关，默认关闭。 */
+    static final String STEERING_LOG_PREFERENCE = "steering_log";
     private int learningCommand = -1;
     private int learningKey = KeyEvent.KEYCODE_UNKNOWN;
+    /** 学习时按下按键的时刻，用于区分单击/长按槽位。0 表示未按下。 */
+    private long learningDownTime;
+    /** 学习厂家广播时按下时刻。 */
+    private long learningVendorDownTime;
     private String learningVendor;
     private TextView steeringHint;
     private TextView overlayPermissionStatus;
     private TextView steeringLog;
+    private LinearLayout steeringLogCard;
     private TextView navigationLog;
     private TextView boxBluetoothName;
     private TextView boxWifiName;
@@ -79,20 +86,22 @@ final class SettingsScreens {
         LinearLayout page = newPage("设置", "环境检测", host::showEnvironmentCheck, host::showMain, true);
         host.updateConnectionStatusViews();
 
-        section("连接与显示");
-        segmentedRow("连接模式", new String[]{"自动", "手动"}, "connect_mode", 0, host::onConnectModeChanged);
+        section("显示");
         segmentedRow("图像比例", new String[]{"等比适应", "拉伸全屏"}, "video_scale_mode", 1, host::onAspectChanged);
         resolutionRow();
-        String[] rates = new String[VideoOptions.FRAME_RATES.length];
-        for (int i = 0; i < rates.length; i++) rates[i] = VideoOptions.FRAME_RATES[i] + "fps";
+        int[] rates = VideoOptions.SELECTABLE_FRAME_RATES;
+        String[] rateLabels = new String[rates.length];
+        for (int i = 0; i < rates.length; i++) rateLabels[i] = rates[i] + "fps";
         if (prefs().getInt("decoder_mode", VideoOptions.HARDWARE) == VideoOptions.SOFTWARE) {
             infoRow("帧率", "25fps（软解，与原版一致）");
         } else {
-            valueChoiceRow("帧率", "frame_rate", rates, VideoOptions.FRAME_RATES,
-                    VideoPreferences.defaultFrameRate(), host::onVideoSettingsChanged);
+            valueChoiceRow("帧率", "frame_rate", rateLabels, rates,
+                    VideoOptions.normalizeFrameRate(VideoPreferences.defaultFrameRate()),
+                    host::onVideoSettingsChanged);
         }
-        segmentedRow("夜间模式", new String[]{"开", "关", "跟随手机", "大灯联动"}, "night_mode", 2, host::onNightModeChanged);
-        segmentedRow("驾驶模式", new String[]{"左舵", "右舵"}, "drive_side", 0, host::onBoxSettingsChanged);
+        // 只保留「跟随手机」与「大灯联动」，偏好值沿用 2 / 3。
+        segmentedValueRow("夜间模式", new String[]{"跟随手机", "大灯联动"}, "night_mode",
+                new int[]{2, 3}, 0, host::onNightModeChanged);
         if (prefs().getInt("decoder_mode", VideoOptions.HARDWARE) == VideoOptions.SOFTWARE) {
             infoRow("显示大小（投屏 DPI）", "160（软解，与原版一致）");
         } else {
@@ -106,16 +115,12 @@ final class SettingsScreens {
         valueChoiceRow("解码方式", "decoder_mode", new String[]{"软解（原版 OpenH264）", "硬解"},
                 new int[]{VideoOptions.SOFTWARE, VideoOptions.HARDWARE},
                 VideoOptions.HARDWARE, host::onDecoderChanged);
-        section("音频");
-        segmentedRow("麦克风", new String[]{"汽车", "手机", "盒子"}, "mic_type", 0, host::onMicSourceChanged);
-        sliderRow("麦克风增益", 30, "mic_gain_db", 0, "dB", host::onMicGainChanged);
 
         section("个性化");
         carLogoRow();
         segmentedRow("主题", new String[]{"跟随系统", "浅色", "深色"}, "theme_mode", 2, host::refreshTheme);
         section("车控");
         navigationRow("方控学习", host::showSteeringLearning);
-        toggleRow("音量键切换音乐", "volume_track", false, value -> { });
         toggleRow("后台控制（媒体按键）", "background_control", false, value -> host.updateBackgroundControl());
 
         section("其他");
@@ -133,7 +138,8 @@ final class SettingsScreens {
         infoRow("软件版本", host.appVersion()).setOnClickListener(view -> host.onVersionTapped());
         navigationRow("检查更新", host::showUpdateCheck);
         String boxVersion = host.boxVersion();
-        infoRow("盒子版本", boxVersion == null ? "未连接" : boxVersion);
+        infoRow("盒子版本", boxVersion == null ? "未连接" : boxVersion)
+                .setOnClickListener(view -> host.showBoxFirmwareCheck());
 
         return page;
     }
@@ -151,6 +157,7 @@ final class SettingsScreens {
         toggleRow("后台连接", ConnectionService.PREFERENCE, true,
                 host::onBackgroundConnectionChanged, host::showBackgroundConnectionHelp);
         toggleRow("触控回传", "touch_enabled", true, host::onTouchEnabledChanged);
+        sliderRow("麦克风增益", 30, "mic_gain_db", 0, "dB", host::onMicGainChanged);
         sliderRow("媒体播放增益", 100, "audio_output_gain", 100, "%", host::onOutputGainChanged);
         choiceRow("媒体延迟", "media_delay_choice",
                 new String[]{"0 ms", "100 ms", "200 ms", "500 ms", "1000 ms"}, 0, () -> {
@@ -442,6 +449,7 @@ final class SettingsScreens {
         cancelSteeringLearning();
         steeringHint = null;
         steeringLog = null;
+        steeringLogCard = null;
         navigationLog = null;
         boxBluetoothName = boxWifiName = null;
         java.util.Arrays.fill(steeringBindings, null);
@@ -614,6 +622,70 @@ final class SettingsScreens {
         }
     }
 
+    /**
+     * 分段控件，但把 {@code values[index]} 写入偏好而不是下标。
+     *
+     * <p>用于「夜间模式」这类语义值不能等于下标的配置：偏好沿用 2 / 3，
+     * 只暴露「跟随手机」「大灯联动」两项。历史值 0 / 1 会被收敛到 2（跟随手机）。
+     */
+    private void segmentedValueRow(String title, String[] options, String key, int[] values,
+            int defaultIndex, Runnable onChange) {
+        if (options.length != values.length) {
+            throw new IllegalArgumentException("options and values must match: " + title);
+        }
+        LinearLayout row = baseRow(false);
+        boolean stacked = options.length > 3;
+        if (stacked) {
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.addView(title(title));
+        } else {
+            row.addView(title(title), grow());
+        }
+
+        LinearLayout control = new LinearLayout(host);
+        control.setOrientation(LinearLayout.HORIZONTAL);
+        control.setPadding(dp(3), dp(3), dp(3), dp(3));
+        control.setBackground(Ui.rounded(Ui.DIVIDER, dp(12)));
+        int selected = selectedValueIndex(values, prefs().getInt(key, values[defaultIndex]),
+                defaultIndex);
+        TextView[] segments = new TextView[options.length];
+        for (int i = 0; i < options.length; i++) {
+            final int index = i;
+            segments[i] = Ui.text(host, options[i], 14, Ui.TEXT_SECONDARY, false);
+            segments[i].setGravity(Gravity.CENTER);
+            segments[i].setPadding(dp(stacked ? 6 : 12), dp(7), dp(stacked ? 6 : 12), dp(7));
+            segments[i].setOnClickListener(view -> {
+                prefs().edit().putInt(key, values[index]).apply();
+                paintSegments(segments, index);
+                if (onChange != null) {
+                    onChange.run();
+                }
+            });
+            if (stacked) control.addView(segments[i], new LinearLayout.LayoutParams(0, -2, 1));
+            else control.addView(segments[i]);
+        }
+        paintSegments(segments, selected);
+        if (stacked) {
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+            params.topMargin = dp(8);
+            row.addView(control, params);
+        } else {
+            row.addView(control);
+        }
+        addRow(row);
+    }
+
+    /**
+     * 在 {@code values} 中定位当前值；历史遗留的越界值回退到默认项，
+     * 避免下拉/分段控件因找不到下标而崩溃。
+     */
+    static int selectedValueIndex(int[] values, int current, int defaultIndex) {
+        for (int i = 0; i < values.length; i++) {
+            if (values[i] == current) return i;
+        }
+        return Math.min(Math.max(defaultIndex, 0), values.length - 1);
+    }
+
     private void choiceRow(String title, String key, String[] choices, int defaultIndex) {
         choiceRow(title, key, choices, defaultIndex, () -> { });
     }
@@ -642,13 +714,14 @@ final class SettingsScreens {
             int defaultValue, Runnable changed) {
         LinearLayout row = baseRow(true);
         row.addView(title(title), grow());
-        int selected = valueIndex(values, prefs().getInt(key, defaultValue));
+        int selected = valueIndex(values, prefs().getInt(key, defaultValue), defaultValue);
         TextView value = Ui.text(host, choices[selected], 15, Ui.ACCENT, true);
         row.addView(value);
         row.addView(chevron());
         row.setOnClickListener(view -> new AlertDialog.Builder(host)
                 .setTitle(title)
-                .setSingleChoiceItems(choices, valueIndex(values, prefs().getInt(key, defaultValue)),
+                .setSingleChoiceItems(choices,
+                        valueIndex(values, prefs().getInt(key, defaultValue), defaultValue),
                         (dialog, which) -> {
                             prefs().edit().putInt(key, values[which]).apply();
                             value.setText(choices[which]);
@@ -658,9 +731,11 @@ final class SettingsScreens {
         addRow(row);
     }
 
-    private static int valueIndex(int[] values, int selected) {
+    /** 定位选项下标；未匹配时回退到默认值对应的位置，避免历史越界值导致崩溃。 */
+    private static int valueIndex(int[] values, int selected, int defaultValue) {
         for (int i = 0; i < values.length; i++) if (values[i] == selected) return i;
-        throw new IllegalArgumentException("Unsupported choice value: " + selected);
+        for (int i = 0; i < values.length; i++) if (values[i] == defaultValue) return i;
+        return 0;
     }
 
     private void choiceRow(String title, String key, String[] choices, int defaultIndex, Runnable changed) {
@@ -752,13 +827,14 @@ final class SettingsScreens {
         section("协议");
         choiceRow("方控协议", SteeringProtocol.PREFERENCE, SteeringProtocol.LABELS, 0,
                 host::onSteeringProtocolChanged);
-        steeringHint = Ui.text(host, "选择下方功能，再按一次方向盘按键", 15, Ui.TEXT, true);
+        steeringHint = Ui.text(host, "选择功能后按一下方向盘键：短按绑定单击，按住 0.8 秒绑定长按",
+                15, Ui.TEXT, true);
         steeringHint.setPadding(dp(8), dp(8), dp(8), dp(8));
         list.addView(steeringHint);
         TextView help = Ui.text(host,
                 SteeringProtocol.vendorEnabled(prefs())
-                        ? "长安 CS35Plus：支持 Android 按键和厂家 NEXT / PRE / VR / MAIN 广播。MAIN 为触摸按钮，按下即可学习；其他键按下并松开。主页、返回控制手机投屏，不会阻止车机原有动作。"
-                        : "默认协议：仅支持 Android 按键。选择下方功能，再按下并松开按键。两种协议的学习绑定独立保存。",
+                        ? "长安 CS35Plus：支持 Android 按键和厂家 NEXT / PRE / VR / MAIN 广播。MAIN 为触摸按钮，按下即可学习；其他键按下并松开。\n\n语音键（VR）默认单击返回主页、长按唤醒 Siri，按住满 0.8 秒立即触发，无需松手。其他厂家键仅支持单击。\n\n同一 Android 按键可同时拥有单击与长按：短按一次学习单击，按住 0.8 秒学习长按。主页、返回控制手机投屏，不会阻止车机原有动作。"
+                        : "默认协议：仅支持 Android 按键。\n\n同一按键可同时拥有单击与长按：短按一次学习单击，按住 0.8 秒学习长按。使用时按住满 0.8 秒立即触发长按，无需松手。两种协议的学习绑定独立保存。",
                 13, Ui.TEXT_SECONDARY, false);
         help.setPadding(dp(8), 0, dp(8), dp(8));
         list.addView(help);
@@ -788,6 +864,7 @@ final class SettingsScreens {
             labels.addView(label);
             steeringBindings[i] = Ui.text(host, "", 13, Ui.TEXT_SECONDARY, false);
             steeringBindings[i].setGravity(Gravity.CENTER);
+            steeringBindings[i].setMaxLines(3);
             steeringBindings[i].setPadding(0, dp(6), 0, 0);
             labels.addView(steeringBindings[i]);
             row.addView(labels);
@@ -830,7 +907,12 @@ final class SettingsScreens {
         params.topMargin = dp(20);
         list.addView(clear, params);
         section("按键日志");
+        toggleRow("记录按键日志", STEERING_LOG_PREFERENCE, false, value -> {
+            if (!value) clearSteeringLog();
+            updateSteeringLogCard();
+        });
         LinearLayout logCard = Ui.card(host);
+        steeringLogCard = logCard;
         if (android.os.Build.VERSION.SDK_INT >= 21) logCard.setElevation(0);
         logCard.setPadding(dp(14), dp(12), dp(14), dp(12));
         Button clearLog = Ui.button(host, "清除日志", false);
@@ -857,8 +939,16 @@ final class SettingsScreens {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(180)));
         list.addView(logCard);
         updateSteeringLog();
+        updateSteeringLogCard();
         updateSteeringBindings();
         return page;
+    }
+
+    /** 按键日志默认关闭，关闭时隐藏整个日志卡片。 */
+    private void updateSteeringLogCard() {
+        if (steeringLogCard == null) return;
+        boolean enabled = prefs().getBoolean(STEERING_LOG_PREFERENCE, false);
+        steeringLogCard.setVisibility(enabled ? View.VISIBLE : View.GONE);
     }
 
     void cancelSteeringLearning() {
@@ -867,9 +957,11 @@ final class SettingsScreens {
         }
         learningCommand = -1;
         learningKey = KeyEvent.KEYCODE_UNKNOWN;
+        learningDownTime = 0;
         learningVendor = null;
+        learningVendorDownTime = 0;
         if (steeringHint != null) {
-            steeringHint.setText("选择下方功能，再按一次方向盘按键");
+            steeringHint.setText("选择功能后按一下方向盘键：短按绑定单击，按住 0.8 秒绑定长按");
             steeringHint.setTextColor(Ui.TEXT);
         }
     }
@@ -883,38 +975,68 @@ final class SettingsScreens {
                 || code == KeyEvent.KEYCODE_UNKNOWN) return false;
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
             learningKey = code;
+            learningDownTime = android.os.SystemClock.elapsedRealtime();
         } else if (event.getAction() == KeyEvent.ACTION_UP && code == learningKey) {
             if (event.isCanceled()) {
                 cancelSteeringLearning();
                 return true;
             }
 
-            prefs().edit().putInt(SteeringProtocol.androidPrefix(prefs()) + code, learningCommand).apply();
+            // 按住时长决定绑定到单击还是长按槽位。
+            long duration = android.os.SystemClock.elapsedRealtime() - learningDownTime;
+            boolean longPress = learningDownTime > 0 && duration >= SteeringProtocol.LONG_PRESS_MS;
+            prefs().edit().putInt(
+                    SteeringProtocol.androidBindingKey(prefs(), code, longPress),
+                    learningCommand).apply();
             android.util.Log.i("AutoPlayKeys", "learn_bound button=" + selectedSteeringActionName(learningCommand)
                     + " key=" + KeyEvent.keyCodeToString(code) + " keyCode=" + code
-                    + " scanCode=" + event.getScanCode());
+                    + " longPress=" + longPress + " held=" + duration
+                    + "ms scanCode=" + event.getScanCode());
             cancelSteeringLearning();
             updateSteeringBindings();
-            steeringHint.setText("学习成功：" + KeyEvent.keyCodeToString(code));
+            steeringHint.setText((longPress ? "已绑定长按：" : "已绑定单击：")
+                    + KeyEvent.keyCodeToString(code));
             steeringHint.setTextColor(Ui.ACCENT);
         }
         return true;
     }
 
-    boolean handleVendorKey(String code, String state, boolean press) {
+    /**
+     * 厂家广播的学习处理。
+     *
+     * <p>语音键（VR）按松手时长决定写入单击还是长按槽位；MAIN 只有按下事件，
+     * 只能学习单击。返回 {@code true} 表示已消费该事件。
+     */
+    boolean handleVendorKey(String code, String state, boolean press, long now) {
         if (!SteeringProtocol.vendorEnabled(prefs())) return false;
         if (learningCommand < 0) return false;
         if (learningKey != KeyEvent.KEYCODE_UNKNOWN) return true;
-        if (press && learningVendor == null) learningVendor = code;
-        if (!code.equals(learningVendor)) return true;
-        if (("MAIN".equals(code) && press) || (!"MAIN".equals(code) && "UP".equals(state))) {
-            prefs().edit().putInt(SteeringProtocol.vendorPrefix() + code, learningCommand).apply();
-            android.util.Log.i("AutoPlayKeys", "learn_bound vendor=" + code + " action=" + learningCommand);
-            cancelSteeringLearning();
-            updateSteeringBindings();
-            steeringHint.setText("学习成功：厂家 " + code);
-            steeringHint.setTextColor(Ui.ACCENT);
+        if (press && learningVendor == null) {
+            learningVendor = code;
+            learningVendorDownTime = now;
         }
+        if (!code.equals(learningVendor)) return true;
+        boolean bind;
+        boolean longPress = false;
+        if ("MAIN".equals(code)) {
+            bind = press;
+        } else if ("UP".equals(state)) {
+            bind = true;
+            longPress = VendorKeys.supportsLongPress(code)
+                    && learningVendorDownTime > 0
+                    && now - learningVendorDownTime >= SteeringProtocol.LONG_PRESS_MS;
+        } else {
+            bind = false;
+        }
+        if (!bind) return true;
+        prefs().edit().putInt(SteeringProtocol.vendorBindingKey(prefs(), code, longPress),
+                learningCommand).apply();
+        android.util.Log.i("AutoPlayKeys", "learn_bound vendor=" + code
+                + " action=" + learningCommand + " longPress=" + longPress);
+        cancelSteeringLearning();
+        updateSteeringBindings();
+        steeringHint.setText((longPress ? "已绑定长按：厂家 " : "已绑定单击：厂家 ") + code);
+        steeringHint.setTextColor(Ui.ACCENT);
         return true;
     }
 
@@ -985,6 +1107,8 @@ final class SettingsScreens {
     }
 
     private void appendSteeringLog(String line) {
+        // 日志默认关闭；关闭时不缓存，避免无谓的内存占用。
+        if (!prefs().getBoolean(STEERING_LOG_PREFERENCE, false)) return;
         steeringLogLines.addFirst(line);
         while (steeringLogLines.size() > 50) steeringLogLines.removeLast();
         updateSteeringLog();
@@ -1001,26 +1125,120 @@ final class SettingsScreens {
     }
 
     private void updateSteeringBindings() {
+        SharedPreferences prefs = prefs();
+        boolean vendor = SteeringProtocol.vendorEnabled(prefs);
+        String androidPrefix = SteeringProtocol.androidPrefix(prefs);
+        String vendorPrefix = SteeringProtocol.vendorPrefix();
+        java.util.Map<String, ?> all = prefs.getAll();
         for (int i = 0; i < STEERING_COMMANDS.length; i++) {
-            StringBuilder keys = new StringBuilder();
-            for (java.util.Map.Entry<String, ?> entry : prefs().getAll().entrySet()) {
-                if (SteeringProtocol.vendorEnabled(prefs())
-                        && entry.getKey().startsWith(SteeringProtocol.vendorPrefix())
-                        && Integer.valueOf(STEERING_COMMANDS[i]).equals(entry.getValue())) {
-                    if (keys.length() > 0) keys.append("、");
-                    keys.append("厂家 ").append(entry.getKey().substring(SteeringProtocol.vendorPrefix().length()));
+            StringBuilder single = new StringBuilder();
+            StringBuilder held = new StringBuilder();
+            Integer command = STEERING_COMMANDS[i];
+            for (java.util.Map.Entry<String, ?> entry : all.entrySet()) {
+                if (!command.equals(entry.getValue())) {
+                    continue;
                 }
-                if (entry.getKey().startsWith(SteeringProtocol.androidPrefix(prefs()))
-                        && Integer.valueOf(STEERING_COMMANDS[i]).equals(entry.getValue())) {
-                    if (keys.length() > 0) keys.append("、");
-                    keys.append(KeyEvent.keyCodeToString(Integer.parseInt(
-                            entry.getKey().substring(SteeringProtocol.androidPrefix(prefs()).length()))));
+                String key = entry.getKey();
+                if (vendor && key.startsWith(vendorPrefix)) {
+                    String suffix = key.substring(vendorPrefix.length());
+                    boolean vendorLong = suffix.startsWith(SteeringProtocol.LONG_SUFFIX);
+                    if (vendorLong) {
+                        suffix = suffix.substring(SteeringProtocol.LONG_SUFFIX.length());
+                    }
+                    appendBinding(vendorLong ? held : single, "厂家 " + suffix);
+                    continue;
                 }
+                AndroidBinding binding = parseAndroidBinding(key, androidPrefix);
+                if (binding == null) {
+                    // 历史遗留或外部写入的脏键，跳过以免崩溃。
+                    android.util.Log.w("AutoPlayKeys", "skip_unknown_binding key=" + key);
+                    continue;
+                }
+                appendBinding(binding.longPress ? held : single,
+                        KeyEvent.keyCodeToString(binding.keyCode));
+            }
+            // 语音键默认值（单击主页 / 长按 Siri）未写入偏好，这里显式提示方便用户理解
+            if (vendor && single.length() == 0
+                    && command == SteeringProtocol.DEFAULT_VR_SINGLE) {
+                appendBinding(single, "厂家 " + SteeringProtocol.VENDOR_VR + "（默认）");
+            }
+            if (vendor && held.length() == 0
+                    && command == SteeringProtocol.DEFAULT_VR_LONG) {
+                appendBinding(held, "厂家 " + SteeringProtocol.VENDOR_VR + "（默认）");
             }
             if (steeringBindings[i] != null) {
-                steeringBindings[i].setText(keys.length() == 0 ? "点击学习" : "已绑定：" + keys);
+                steeringBindings[i].setText(describeBindings(single, held));
             }
         }
+    }
+
+    private static void appendBinding(StringBuilder builder, String value) {
+        if (builder.length() > 0) builder.append("、");
+        builder.append(value);
+    }
+
+    /** 单击/长按分别成行展示，都为空时提示「点击学习」。 */
+    private static String describeBindings(StringBuilder single, StringBuilder held) {
+        if (single.length() == 0 && held.length() == 0) return "点击学习";
+        StringBuilder text = new StringBuilder();
+        if (single.length() > 0) text.append("单击：").append(single);
+        if (held.length() > 0) {
+            if (text.length() > 0) text.append('\n');
+            text.append("长按：").append(held);
+        }
+        return text.toString();
+    }
+
+    /** Android 按键绑定的解析结果：键码 + 是否长按槽位。 */
+    static final class AndroidBinding {
+        final int keyCode;
+        final boolean longPress;
+
+        AndroidBinding(int keyCode, boolean longPress) {
+            this.keyCode = keyCode;
+            this.longPress = longPress;
+        }
+    }
+
+    /**
+     * 从 {@code <prefix>[long_]<keyCode>} 形式的偏好键中解析绑定。
+     *
+     * <p>偏好数据的来源不受本应用完全控制（历史版本或外部写入都可能留下非数字后缀），
+     * 因此解析失败时返回 {@code null} 而不是抛出异常。
+     */
+    static AndroidBinding parseAndroidBinding(String key, String prefix) {
+        if (key == null || prefix == null || !key.startsWith(prefix)) {
+            return null;
+        }
+        String suffix = key.substring(prefix.length());
+        boolean longPress = suffix.startsWith(SteeringProtocol.LONG_SUFFIX);
+        if (longPress) {
+            suffix = suffix.substring(SteeringProtocol.LONG_SUFFIX.length());
+        }
+        if (suffix.isEmpty()) {
+            return null;
+        }
+        for (int index = 0; index < suffix.length(); index++) {
+            char value = suffix.charAt(index);
+            // 只接受可选负号加纯数字，避免 NumberFormatException 拖垮界面。
+            if (index == 0 && value == '-' && suffix.length() > 1) {
+                continue;
+            }
+            if (value < '0' || value > '9') {
+                return null;
+            }
+        }
+        try {
+            return new AndroidBinding(Integer.parseInt(suffix), longPress);
+        } catch (NumberFormatException exception) {
+            return null;
+        }
+    }
+
+    /** 仅取键码的兼容版本；长按绑定同样返回其键码。 */
+    static Integer parseAndroidKeyCode(String key, String prefix) {
+        AndroidBinding binding = parseAndroidBinding(key, prefix);
+        return binding == null ? null : binding.keyCode;
     }
 
     private void navigationRow(String title, Runnable action) {
@@ -1141,7 +1359,7 @@ final class SettingsScreens {
 
     private void carLogoRow() {
         LinearLayout row = baseRow(true);
-        row.addView(title("汽车图标"), grow());
+        row.addView(title("OEM 设置"), grow());
         carLogoPreview = new ImageView(host);
         carLogoPreview.setScaleType(ImageView.ScaleType.FIT_CENTER);
         row.addView(carLogoPreview, new LinearLayout.LayoutParams(dp(44), dp(44)));

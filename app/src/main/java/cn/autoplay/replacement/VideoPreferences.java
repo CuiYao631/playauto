@@ -7,28 +7,35 @@ final class VideoPreferences {
     private VideoPreferences() { }
 
     static synchronized void migrate(SharedPreferences prefs) {
-        if (prefs.getBoolean("original_video_options_v1", false)) return;
+        if (prefs.getBoolean("original_video_options_v2", false)) return;
         SharedPreferences.Editor editor = prefs.edit();
-        if (prefs.contains("decoder_mode")) {
-            int previous = prefs.getInt("decoder_mode", VideoOptions.HARDWARE);
-            int selected = VideoOptions.migrateDecoder(previous);
-            editor.putInt("decoder_mode", selected);
-            if (previous != selected) Log.i("AutoPlayVideo", "Migrate decoder " + previous + " -> " + selected);
+        if (!prefs.getBoolean("original_video_options_v1", false)) {
+            if (prefs.contains("decoder_mode")) {
+                int previous = prefs.getInt("decoder_mode", VideoOptions.HARDWARE);
+                int selected = VideoOptions.migrateDecoder(previous);
+                editor.putInt("decoder_mode", selected);
+                if (previous != selected) Log.i("AutoPlayVideo", "Migrate decoder " + previous + " -> " + selected);
+            }
+            if (prefs.contains("screen_dpi")) {
+                int previous = prefs.getInt("screen_dpi", 1);
+                if (previous < 0 || previous > 3) throw new IllegalArgumentException("Invalid old DPI index: " + previous);
+                editor.putInt("screen_dpi", new int[]{120, 160, 240, 320}[previous]);
+            }
+            editor.putBoolean("original_video_options_v1", true);
         }
         if (prefs.contains("frame_rate")) {
-            editor.putInt("frame_rate", VideoOptions.migrateFrameRate(prefs.getInt("frame_rate", 30)));
+            int previous = prefs.getInt("frame_rate", VideoOptions.DEFAULT_FPS);
+            int selected = VideoOptions.normalizeFrameRate(previous);
+            editor.putInt("frame_rate", selected);
+            if (previous != selected) Log.i("AutoPlayVideo", "Migrate frame rate " + previous + " -> " + selected);
         }
-        if (prefs.contains("screen_dpi")) {
-            int previous = prefs.getInt("screen_dpi", 1);
-            if (previous < 0 || previous > 3) throw new IllegalArgumentException("Invalid old DPI index: " + previous);
-            editor.putInt("screen_dpi", new int[]{120, 160, 240, 320}[previous]);
-        }
-        editor.putBoolean("original_video_options_v1", true).apply();
+        editor.putBoolean("original_video_options_v2", true).apply();
     }
 
     static int frameRate(SharedPreferences prefs) {
         return VideoOptions.effectiveFrameRate(prefs.getInt("decoder_mode", VideoOptions.HARDWARE),
-                prefs.getInt("frame_rate", defaultFrameRate()));
+                VideoOptions.normalizeFrameRate(
+                        prefs.getInt("frame_rate", defaultFrameRate())));
     }
 
     static int defaultFrameRate() {

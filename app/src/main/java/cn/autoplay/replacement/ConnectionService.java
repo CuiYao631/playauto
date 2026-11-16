@@ -79,6 +79,15 @@ public final class ConnectionService extends Service {
     String boxStatus = "盒子：未连接";
     String phoneStatus = "手机：未连接";
     String boxVersion;
+    /** 盒子固件检查所需的身份信息，来自 CMD_BOX_INFO(25)。 */
+    String boxUuid;
+    String boxManufacturer;
+    String boxProductType;
+    String boxFirmwareName;
+    /** 盒子固件升级进度，-1 表示尚未开始。 */
+    volatile int firmwareProgress = -1;
+    /** 盒子固件升级状态，0 表示空闲；1 开始、2 成功、3 失败、5/6/7 OTA。 */
+    volatile int firmwareStatus = 0;
     String boxBluetoothName;
     String boxWifiName;
     boolean phonePlugged;
@@ -533,6 +542,35 @@ public final class ConnectionService extends Service {
             @Override public void onBoxVersion(String version) {
                 dispatch(epoch, () -> { boxVersion = version; notifyClient(); });
             }
+            @Override public void onFirmwareProgress(int percent) {
+                dispatch(epoch, () -> {
+                    firmwareProgress = percent;
+                    setBoxStatus("盒子：固件升级中 " + percent + "%");
+                });
+            }
+            @Override public void onFirmwareStatus(int status) {
+                dispatch(epoch, () -> {
+                    firmwareStatus = status;
+                    if (status == 1 || status == 5) {
+                        firmwareProgress = 0;
+                    } else if (status == 2 || status == 6) {
+                        firmwareProgress = 100;
+                    } else if (status == 3 || status == 7) {
+                        firmwareProgress = -1;
+                    }
+                    setBoxStatus("盒子：固件" + BoxProtocolSession.describeFirmwareStatus(status));
+                });
+            }
+            @Override public void onBoxInfo(String uuid, String manufacturer, String productType,
+                                            String firmwareName) {
+                dispatch(epoch, () -> {
+                    boxUuid = uuid;
+                    boxManufacturer = manufacturer;
+                    boxProductType = productType;
+                    boxFirmwareName = firmwareName;
+                    notifyClient();
+                });
+            }
             @Override public void onNavigationData(String data) {
                 dispatch(epoch, () -> recordNavigationData(data));
             }
@@ -570,10 +608,25 @@ public final class ConnectionService extends Service {
         notifyClient();
     }
 
+    /**
+     * 把固件镜像下发给盒子。盒子随后通过 177/187 回报进度与结果，
+     * 进度会经 {@link #firmwareProgress} / {@link #firmwareStatus} 暴露给界面。
+     */
+    boolean sendFirmwareImage(byte[] image) {
+        BoxProtocolSession current = session;
+        if (current == null) {
+            setBoxStatus("盒子：未连接，无法下发固件");
+            return false;
+        }
+        firmwareProgress = 0;
+        firmwareStatus = 0;
+        notifyClient();
+        return current.sendFirmwareImage(image);
+    }
+
     void syncCarLogo() {
         BoxProtocolSession current = session;
-        if (current == null) return;
-        String path = prefs().getString("CarPlayOEMIconPath", CarLogoUpload.DEFAULT_PATH);
+        if (current == null) return;        String path = prefs().getString("CarPlayOEMIconPath", CarLogoUpload.DEFAULT_PATH);
         new Thread(() -> {
             try {
                 CarLogoUpload.send(this, current, path);
@@ -597,13 +650,14 @@ public final class ConnectionService extends Service {
         updateMediaSession();
         BoxProtocolSession current = session;
         if (current == null) return;
-        current.setAutoConnectEnabled(prefs.getInt("connect_mode", 0) == 0);
+        // 连接模式固定自动；麦克风固定使用汽车麦克风；驾驶方向固定左舵。
+        current.setAutoConnectEnabled(true);
         current.setNightMode(currentNightSetting());
-        current.setMicSource(prefs.getInt("mic_type", 0));
+        current.setMicSource(0);
         current.setAutoPlayMusic(prefs.getBoolean("auto_play_music", false));
         List<BoxSetting> settings = new ArrayList<>();
         settings.add(BoxSetting.dashboardInfo());
-        if (prefs.contains("drive_side")) settings.add(BoxSetting.integer("drivePosition", prefs.getInt("drive_side", 0)));
+        settings.add(BoxSetting.integer("drivePosition", 0));
         if (prefs.contains("media_delay")) settings.add(BoxSetting.integer("mediaDelay", prefs.getInt("media_delay", 0)));
         if (prefs.contains("dock_position")) settings.add(BoxSetting.integer("DockPosition", prefs.getInt("dock_position", 0)));
         settings.add(BoxSetting.screenDpi(VideoPreferences.dpi(prefs, width, height)));
@@ -618,7 +672,8 @@ public final class ConnectionService extends Service {
     private int currentNightSetting() {
         int mode = prefs().getInt("night_mode", 2);
         if (mode == 3) return headlightNightMode.currentSetting();
-        return mode == 0 ? 1 : mode == 1 ? 0 : -1;
+        // 设置页只保留「跟随手机」与「大灯联动」；历史值 0/1（开/关）统一按跟随手机处理。
+        return -1;
     }
 
     private void onHeadlightChanged() {
@@ -694,12 +749,21 @@ public final class ConnectionService extends Service {
     }
 
     int mediaCommand(int keyCode) {
-        int learned = SteeringProtocol.androidCommand(prefs(), keyCode);
+        return mediaCommand(keyCode, false);
+    }
+
+    /**
+     * 查询按键对应的功能号。
+     *
+     * @param longPress {@code true} 查询长按绑定；内置默认行为只提供单击
+     * @return 功能号；无对应行为时为 -1
+     */
+    int mediaCommand(int keyCode, boolean longPress) {
+        int learned = SteeringProtocol.androidCommand(prefs(), keyCode, longPress);
         if (learned >= 0) return learned;
-        if (prefs().getBoolean("volume_track", false)) {
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) return 205;
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) return 204;
-        }
+        // 内置默认只定义单击语义，长按必须由用户显式学习。
+        if (longPress) return -1;
+        // 音量键不再默认映射到上一曲/下一曲；如需该行为，请在「方控学习」中显式绑定。
         switch (keyCode) {
             case KeyEvent.KEYCODE_MEDIA_PLAY: return 201;
             case KeyEvent.KEYCODE_MEDIA_PAUSE: return 202;
@@ -791,6 +855,12 @@ public final class ConnectionService extends Service {
         if (wakeLock.isHeld()) wakeLock.release();
         phonePlugged = bluetoothLinked = wifiLinked = false;
         boxVersion = null;
+        boxUuid = null;
+        boxManufacturer = null;
+        boxProductType = null;
+        boxFirmwareName = null;
+        firmwareProgress = -1;
+        firmwareStatus = 0;
         boxBluetoothName = boxWifiName = null;
         boxStatus = "盒子：未连接";
         phoneStatus = "手机：未连接";

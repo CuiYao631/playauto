@@ -8,8 +8,24 @@ final class VideoOptions {
     static final int SOFTWARE = 3;
     static final int DEFAULT_FPS = 30;
     static final int[] FRAME_RATES = {60, 55, 50, 45, 40, 35, 30, 25, 20};
+    /** 设置页可选帧率，只保留 30 与 60。 */
+    static final int[] SELECTABLE_FRAME_RATES = {60, 30};
 
     private VideoOptions() { }
+
+    /**
+     * 把任意历史帧率归一到设置页可选的 30 / 60。
+     *
+     * <p>旧版本允许 20~60 的九档取值，升级后这些值仍然存在于偏好里，
+     * 直接用于 {@link #SELECTABLE_FRAME_RATES} 的下标查找会抛异常，因此统一收敛。
+     */
+    static int normalizeFrameRate(int value) {
+        if (value == 60 || value == 30) return value;
+        for (int candidate : FRAME_RATES) {
+            if (candidate == value) return value >= 45 ? 60 : 30;
+        }
+        return DEFAULT_FPS;
+    }
 
     static int effectiveFrameRate(int decoder, int selected) {
         if (decoder == SOFTWARE) return 25;

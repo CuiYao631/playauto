@@ -91,11 +91,37 @@ public final class MainActivity extends Activity {
                 android.util.Log.w("AutoPlayKeys", "Unsupported vendor key or state; ignored");
                 return;
             }
-            boolean press = vendorKeys.press(key, phase, android.os.SystemClock.elapsedRealtime());
-            if (learningPage && screens.handleVendorKey(key, phase, press)) return;
-            int command = SteeringProtocol.vendorCommand(getPreferences(MODE_PRIVATE), key);
-            if (press && command >= 0 && phonePlugged && connectionService != null) {
-                connectionService.sendSteeringCommand(command, "vendor");
+            android.content.SharedPreferences prefs = getPreferences(MODE_PRIVATE);
+            long now = android.os.SystemClock.elapsedRealtime();
+            boolean press = vendorKeys.press(key, phase, now);
+            if (learningPage && screens.handleVendorKey(key, phase, press, now)) return;
+
+            int single = SteeringProtocol.vendorCommand(prefs, key, false);
+            int held = SteeringProtocol.vendorCommand(prefs, key, true);
+            if (VendorKeys.supportsLongPress(key) && held >= 0) {
+                // 语音键：DOWN 不立即执行，满 800ms 自动触发长按；UP 时未触发过长按才走单击
+                if (press) {
+                    uiHandler.removeCallbacks(vendorLongPressTask);
+                    vendorPress.begin(key, single, held, now);
+                    uiHandler.postDelayed(vendorLongPressTask, SteeringProtocol.LONG_PRESS_MS);
+                } else if ("UP".equals(phase)) {
+                    uiHandler.removeCallbacks(vendorLongPressTask);
+                    if (vendorPress.isPressed(key)) {
+                        boolean longFired = vendorPress.isLongFired();
+                        long heldMs = vendorPress.heldMs(now);
+                        int action = vendorPress.finish(now);
+                        android.util.Log.i("AutoPlayKeys", "vendor_dispatch key=" + key
+                                + " held=" + heldMs + "ms longFired=" + longFired
+                                + " action=" + action);
+                        if (action >= 0 && phonePlugged && connectionService != null) {
+                            connectionService.sendSteeringCommand(action, "vendor");
+                        }
+                    }
+                }
+                return;
+            }
+            if (press && single >= 0 && phonePlugged && connectionService != null) {
+                connectionService.sendSteeringCommand(single, "vendor");
             }
         }
     };
@@ -137,6 +163,73 @@ public final class MainActivity extends Activity {
     private boolean activityVisible;
     private boolean hostPageRequested;
     private boolean requestingMicrophone;
+    /** 已绑定长按的按键状态机：按住满 800ms 立即触发长按，无需等松手。 */
+    private final SteeringProtocol.PressState steeringPress = new SteeringProtocol.PressState();
+    /** 厂家语音键的长按状态机，与 Android 按键互不干扰。 */
+    private final SteeringProtocol.PressState vendorPress = new SteeringProtocol.PressState();
+    /** 按住满 800ms 立即触发长按。 */
+    private final Runnable steeringLongPressTask = () -> {
+        if (!steeringPress.isPressed()) {
+            return;
+        }
+        long now = android.os.SystemClock.elapsedRealtime();
+        int action = steeringPress.longActionIfDue(now);
+        if (action < 0) {
+            return;
+        }
+        android.util.Log.i("AutoPlayKeys", "long_press_fired action=" + action
+                + " held=" + steeringPress.heldMs(now) + "ms");
+        if (connectionService != null) {
+            connectionService.sendSteeringCommand(action, "android");
+        }
+    };
+    /** 厂家语音键：按住满 800ms 立即触发长按（唤醒 Siri）。 */
+    private final Runnable vendorLongPressTask = () -> {
+        if (!vendorPress.isPressed()) {
+            return;
+        }
+        long now = android.os.SystemClock.elapsedRealtime();
+        int action = vendorPress.longActionIfDue(now);
+        if (action < 0) {
+            return;
+        }
+        android.util.Log.i("AutoPlayKeys", "vendor_long_press_fired key=" + vendorPress.pressedKey()
+                + " action=" + action + " held=" + vendorPress.heldMs(now) + "ms");
+        if (phonePlugged && connectionService != null) {
+            connectionService.sendSteeringCommand(action, "vendor");
+        }
+    };
+
+    // ---- 升级页面状态（盒子固件 / 软件更新共用同一套页面样式） ----
+    private static final int FIRMWARE_IDLE = 0;
+    private static final int FIRMWARE_UPGRADING = 1;
+    private static final int FIRMWARE_WAIT_REBOOT = 2;
+    private static final int FIRMWARE_FAILED = 3;
+    private static final long FIRMWARE_REBOOT_TIMEOUT_MS = 120_000L;
+    private boolean firmwarePageVisible;
+    private int firmwarePagePhase = FIRMWARE_IDLE;
+    private boolean firmwareSawDisconnect;
+    private boolean firmwareSuppressed;
+    private int firmwareShownProgress = -1;
+    private UpgradeProgressPage firmwarePage;
+    private final android.os.Handler uiHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable firmwareRebootTimeout = () -> {
+        if (firmwarePagePhase == FIRMWARE_WAIT_REBOOT) {
+            finishFirmwarePage("未检测到盒子重启，请手动确认固件版本");
+        }
+    };
+
+    // ---- 软件更新页面状态 ----
+    private static final int APP_UPDATE_IDLE = 0;
+    private static final int APP_UPDATE_DOWNLOADING = 1;
+    private static final int APP_UPDATE_READY = 2;
+    private static final int APP_UPDATE_INSTALLING = 3;
+    private static final int APP_UPDATE_FAILED = 4;
+    private boolean appUpdatePageVisible;
+    private int appUpdatePhase = APP_UPDATE_IDLE;
+    private UpgradeProgressPage appUpdatePage;
+    private String appUpdateFailure = "";
     private final ConnectionService.Client connectionClient = new ConnectionService.Client() {
         @Override public void onNavigationLogChanged() {
             screens.updateNavigationLog();
@@ -161,6 +254,7 @@ public final class MainActivity extends Activity {
             boxVersion = service.boxVersion;
             connectionStatus.setText(service.boxStatus);
             phoneStatus.setText(service.phoneStatus);
+            syncFirmwareState(service);
             if (!phonePlugged) {
                 hostPageRequested = false;
                 videoStarted = false;
@@ -265,6 +359,10 @@ public final class MainActivity extends Activity {
     protected void onPause() {
         activityVisible = false;
         vendorKeys.reset();
+        uiHandler.removeCallbacks(steeringLongPressTask);
+        uiHandler.removeCallbacks(vendorLongPressTask);
+        steeringPress.reset();
+        vendorPress.reset();
         if (vendorKeysRegistered) {
             unregisterReceiver(vendorKeyReceiver);
             vendorKeysRegistered = false;
@@ -276,6 +374,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        uiHandler.removeCallbacks(steeringLongPressTask);
+        uiHandler.removeCallbacks(vendorLongPressTask);
+        steeringPress.reset();
+        vendorPress.reset();
         if (testTone != null) {
             testTone.release();
             testTone = null;
@@ -305,6 +407,22 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (firmwarePageVisible) {
+            if (firmwarePagePhase == FIRMWARE_UPGRADING) {
+                Toast.makeText(this, "升级进行中，请勿退出", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            exitFirmwarePage();
+            return;
+        }
+        if (appUpdatePageVisible) {
+            if (appUpdatePhase == APP_UPDATE_DOWNLOADING) {
+                Toast.makeText(this, "正在下载更新，请稍候", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            exitAppUpdatePage();
+            return;
+        }
         if (settingsVisible) {
             if (settingsPage == PAGE_SETTINGS) {
                 showMain();
@@ -920,20 +1038,455 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
-    private void downloadAndInstall(String downloadUrl) {
-        ProgressBar progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+    // ---- 盒子固件更新 ----
+
+    /** 盒子固件服务端基址，与原版一致。 */
+    private static final String BOX_FIRMWARE_BASE_URL = BoxFirmwareChecker.DEFAULT_BASE_URL;
+
+    String boxFirmwareVersion() {
+        ConnectionService service = connectionService;
+        return service == null ? null : service.boxVersion;
+    }
+
+    void showBoxFirmwareCheck() {
+        ConnectionService service = connectionService;
+        if (service == null) {
+            Toast.makeText(this, "请先连接盒子", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String boxVersion = service.boxVersion;
+        if (boxVersion == null || boxVersion.isEmpty()) {
+            Toast.makeText(this, "尚未获取盒子固件版本，请稍候重试", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (service.boxUuid == null || service.boxUuid.isEmpty()) {
+            Toast.makeText(this, "尚未获取盒子信息（uuid/型号），请重新插拔盒子",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        Toast.makeText(this, "正在检查盒子固件…", Toast.LENGTH_SHORT).show();
+        BoxFirmwareChecker.check(
+                BOX_FIRMWARE_BASE_URL,
+                "",
+                appVersion(),
+                boxVersion,
+                service.boxUuid,
+                service.boxManufacturer,
+                service.boxProductType,
+                service.boxFirmwareName == null || service.boxFirmwareName.isEmpty()
+                        ? BoxFirmwareChecker.FIRMWARE_FILE_NAME : service.boxFirmwareName,
+                new BoxFirmwareChecker.Callback() {
+                    @Override
+                    public void onResult(BoxFirmwareChecker.Info info, String token) {
+                        if (info == null) {
+                            Toast.makeText(MainActivity.this,
+                                    "盒子固件已是最新版本（" + boxVersion + "）",
+                                    Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        showBoxFirmwareDialog(info, token);
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                    }
+                });
+    }
+
+    private void showBoxFirmwareDialog(BoxFirmwareChecker.Info info, String token) {
+        StringBuilder message = new StringBuilder();
+        message.append("当前版本：").append(boxFirmwareVersion()).append('\n');
+        message.append("最新版本：").append(info.version).append('\n');
+        if (info.size > 0) {
+            message.append("包大小：")
+                    .append(String.format(java.util.Locale.ROOT, "%.1f MB",
+                            info.size / 1024.0 / 1024.0))
+                    .append('\n');
+        }
+        if (info.forced) {
+            message.append("\n⚠ 该版本为强制升级\n");
+        }
+        if (info.notes != null && !info.notes.isEmpty()) {
+            message.append("\n更新说明：\n").append(info.notes);
+        }
+        message.append("\n\n升级过程中请勿拔出盒子或断电。");
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("盒子固件更新")
+                .setMessage(message.toString())
+                .setPositiveButton("下载并升级", (dialog, which) -> downloadBoxFirmware(info, token));
+        if (!info.forced) {
+            builder.setNegativeButton("稍后", null);
+        }
+        builder.show();
+    }
+
+    private void downloadBoxFirmware(BoxFirmwareChecker.Info info, String token) {
+        ProgressBar progressBar = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
         progressBar.setProgress(0);
 
-        TextView statusText = Ui.text(this, "正在下载更新...", 14, Ui.TEXT, false);
+        TextView statusText = Ui.text(this, "正在下载固件…", 14, Ui.TEXT, false);
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
-        layout.setPadding(Ui.dp(this, 32), Ui.dp(this, 32), Ui.dp(this, 32), Ui.dp(this, 32));
+        layout.setPadding(Ui.dp(this, 32), Ui.dp(this, 24), Ui.dp(this, 32), Ui.dp(this, 24));
         layout.addView(statusText);
         layout.addView(progressBar);
-        setContentView(layout);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("下载盒子固件")
+                .setView(layout)
+                .setCancelable(false)
+                .setNegativeButton("取消", null)
+                .create();
+        dialog.show();
+
+        BoxFirmwareChecker.download(BOX_FIRMWARE_BASE_URL, token, info,
+                getCacheDir(), new BoxFirmwareChecker.DownloadCallback() {
+                    @Override
+                    public void onProgress(long downloaded, long total) {
+                        if (!dialog.isShowing()) return;
+                        if (total > 0) {
+                            progressBar.setProgress((int) (downloaded * 100 / total));
+                        }
+                        statusText.setText(String.format(java.util.Locale.ROOT,
+                                "已下载 %.1f / %.1f MB",
+                                downloaded / 1024.0 / 1024.0, total / 1024.0 / 1024.0));
+                    }
+
+                    @Override
+                    public void onSuccess(File file) {
+                        if (dialog.isShowing()) dialog.dismiss();
+                        applyBoxFirmware(file);
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        if (dialog.isShowing()) dialog.dismiss();
+                        Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                    }
+                });
+    }
+
+    private void applyBoxFirmware(File file) {
+        ConnectionService service = connectionService;
+        if (service == null) {
+            Toast.makeText(this, "盒子已断开，无法升级", Toast.LENGTH_LONG).show();
+            return;
+        }
+        byte[] image;
+        try {
+            image = readAllBytes(file);
+        } catch (IOException exception) {
+            Toast.makeText(this, "读取固件失败：" + exception.getMessage(),
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (image.length > BoxProtocolSession.MAX_FIRMWARE_SIZE) {
+            Toast.makeText(this, "固件包超过 50MB 上限", Toast.LENGTH_LONG).show();
+            return;
+        }
+        boolean sent = service.sendFirmwareImage(image);
+        if (sent) {
+            firmwareSuppressed = false;
+            firmwareShownProgress = 0;
+            enterFirmwareUpgrading();
+        } else {
+            Toast.makeText(this, "固件下发失败，请查看连接状态", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private static byte[] readAllBytes(File file) throws IOException {
+        try (java.io.FileInputStream input = new java.io.FileInputStream(file);
+             java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    // ---- 盒子固件升级页面 ----
+
+    /**
+     * 固件升级专用页面：全屏展示进度，升级成功后等待盒子重启再自动退出。
+     *
+     * <p>进入条件由 {@link #syncFirmwareState} 决定：盒子开始上报 187/177，
+     * 或本应用主动下发固件成功后立即进入。
+     */
+    private void showFirmwarePage() {
+        if (firmwarePageVisible) {
+            updateFirmwarePageUi();
+            return;
+        }
+        firmwarePageVisible = true;
+        if (firmwarePage == null) {
+            firmwarePage = new UpgradeProgressPage(this, "盒子固件升级",
+                    "升级过程中请勿拔出盒子或断开电源");
+            firmwarePage.setExitText("退出升级页");
+            firmwarePage.setOnExit(this::exitFirmwarePage);
+        }
+        View page = firmwarePage.root();
+        setContentView(page);
+        fadeIn(page);
+        updateFirmwarePageUi();
+    }
+
+    private void updateFirmwarePageUi() {
+        if (!firmwarePageVisible || firmwarePage == null) {
+            return;
+        }
+        firmwarePage.setIndeterminate(false);
+        firmwarePage.setProgress(firmwareShownProgress < 0 ? 0 : firmwareShownProgress);
+
+        switch (firmwarePagePhase) {
+            case FIRMWARE_UPGRADING:
+                firmwarePage.setStatus("正在升级盒子固件，请保持连接", Ui.TEXT);
+                firmwarePage.setHint("升级完成后盒子会自动重启，请耐心等待");
+                firmwarePage.setExitVisible(false);
+                break;
+            case FIRMWARE_WAIT_REBOOT:
+                firmwarePage.setProgress(100);
+                firmwarePage.setStatus("升级成功，等待盒子重启…", Ui.ACCENT);
+                firmwarePage.setHint("盒子重启并重新连接后会自动退出本页面");
+                firmwarePage.setExitVisible(true);
+                break;
+            case FIRMWARE_FAILED:
+                firmwarePage.setStatus("升级失败", Ui.ERROR);
+                firmwarePage.setExitVisible(true);
+                break;
+            default:
+                firmwarePage.setStatus("正在准备升级…", Ui.TEXT);
+                firmwarePage.setExitVisible(false);
+                break;
+        }
+    }
+
+    private void enterFirmwareUpgrading() {
+        firmwarePagePhase = FIRMWARE_UPGRADING;
+        if (firmwareShownProgress < 0) firmwareShownProgress = 0;
+        uiHandler.removeCallbacks(firmwareRebootTimeout);
+        showFirmwarePage();
+    }
+
+    private void enterFirmwareWaitReboot() {
+        firmwarePagePhase = FIRMWARE_WAIT_REBOOT;
+        firmwareShownProgress = 100;
+        firmwareSawDisconnect = false;
+        showFirmwarePage();
+        updateFirmwarePageUi();
+        uiHandler.removeCallbacks(firmwareRebootTimeout);
+        uiHandler.postDelayed(firmwareRebootTimeout, FIRMWARE_REBOOT_TIMEOUT_MS);
+    }
+
+    private void enterFirmwareFailed(String message) {
+        firmwarePagePhase = FIRMWARE_FAILED;
+        showFirmwarePage();
+        if (firmwarePage != null) firmwarePage.setHint(message);
+        updateFirmwarePageUi();
+        uiHandler.removeCallbacks(firmwareRebootTimeout);
+    }
+
+    private void setFirmwareProgress(int progress) {
+        firmwareShownProgress = Math.max(0, Math.min(100, progress));
+        updateFirmwarePageUi();
+    }
+
+    /** 升级流程结束，提示后返回之前的页面。 */
+    private void finishFirmwarePage(String message) {
+        uiHandler.removeCallbacks(firmwareRebootTimeout);
+        firmwarePagePhase = FIRMWARE_IDLE;
+        firmwareSawDisconnect = false;
+        firmwareShownProgress = -1;
+        firmwareSuppressed = true;
+        firmwarePageVisible = false;
+        if (message != null && !message.isEmpty()) {
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+        }
+        if (settingsVisible) {
+            showSettingsPageOf(settingsPage);
+        } else {
+            showMain();
+        }
+    }
+
+    private void exitFirmwarePage() {
+        if (firmwarePagePhase == FIRMWARE_UPGRADING) {
+            Toast.makeText(this, "升级进行中，请勿退出", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        finishFirmwarePage(null);
+    }
+
+    /**
+     * 根据服务层上报的固件状态推进页面。
+     *
+     * <p>状态来源：盒子 187 命令（1 开始 / 2 成功 / 3 失败 / 5~7 OTA）与 177 进度命令。
+     */
+    private void syncFirmwareState(ConnectionService service) {
+        if (service == null) {
+            return;
+        }
+        int status = service.firmwareStatus;
+        int progress = service.firmwareProgress;
+        boolean sessionAlive = service.getSession() != null;
+
+        if (firmwareSuppressed) {
+            if (status == 0 && progress < 0) {
+                firmwareSuppressed = false;
+            } else if (status == 1 || status == 5) {
+                firmwareSuppressed = false;
+            } else {
+                return;
+            }
+        }
+
+        if (firmwarePagePhase == FIRMWARE_IDLE) {
+            if (status == 1 || status == 5 || progress >= 0) {
+                enterFirmwareUpgrading();
+                if (progress >= 0) setFirmwareProgress(progress);
+            } else if (status == 2 || status == 6) {
+                enterFirmwareWaitReboot();
+            } else if (status == 3 || status == 7) {
+                enterFirmwareFailed("盒子报告升级失败，请稍后重试或使用 U 盘升级");
+            }
+            return;
+        }
+
+        if (firmwarePagePhase == FIRMWARE_UPGRADING) {
+            if (progress >= 0) setFirmwareProgress(progress);
+            if (status == 2 || status == 6) {
+                enterFirmwareWaitReboot();
+            } else if (status == 3 || status == 7) {
+                enterFirmwareFailed("盒子报告升级失败，请稍后重试或使用 U 盘升级");
+            } else if (!sessionAlive) {
+                enterFirmwareFailed("升级过程中盒子连接中断，请重新插拔盒子后确认固件版本");
+            }
+            return;
+        }
+
+        if (firmwarePagePhase == FIRMWARE_WAIT_REBOOT) {
+            if (!sessionAlive) {
+                // 盒子重启会先断开 USB。
+                firmwareSawDisconnect = true;
+            } else if (firmwareSawDisconnect && service.boxVersion != null
+                    && !service.boxVersion.isEmpty()) {
+                finishFirmwarePage("升级完成，盒子已重启（固件 " + service.boxVersion + "）");
+            }
+        }
+    }
+
+    // ---- 软件更新页面 ----
+
+    /** 进入全屏更新页面（与盒子固件升级页同一套样式）。 */
+    private void showAppUpdatePage() {
+        if (appUpdatePageVisible) {
+            updateAppUpdatePageUi();
+            return;
+        }
+        appUpdatePageVisible = true;
+        if (appUpdatePage == null) {
+            appUpdatePage = new UpgradeProgressPage(this, "软件更新",
+                    "下载过程中请保持网络连接，请勿退出");
+            appUpdatePage.setExitText("退出更新页");
+            appUpdatePage.setOnExit(this::exitAppUpdatePage);
+        }
+        View page = appUpdatePage.root();
+        setContentView(page);
+        fadeIn(page);
+        updateAppUpdatePageUi();
+    }
+
+    private void updateAppUpdatePageUi() {
+        if (!appUpdatePageVisible || appUpdatePage == null) {
+            return;
+        }
+        switch (appUpdatePhase) {
+            case APP_UPDATE_DOWNLOADING:
+                appUpdatePage.setIndeterminate(false);
+                appUpdatePage.setStatus("正在下载新版本，请保持网络连接", Ui.TEXT);
+                appUpdatePage.setHint("下载完成后会自动打开系统安装程序");
+                appUpdatePage.setExitVisible(false);
+                break;
+            case APP_UPDATE_READY:
+                appUpdatePage.setIndeterminate(false);
+                appUpdatePage.setProgress(100);
+                appUpdatePage.setStatus("下载完成，准备安装", Ui.ACCENT);
+                appUpdatePage.setHint("即将打开系统安装程序，请按提示完成安装");
+                appUpdatePage.setExitVisible(true);
+                break;
+            case APP_UPDATE_INSTALLING:
+                appUpdatePage.setIndeterminate(true);
+                appUpdatePage.setPercentText("安装中");
+                appUpdatePage.setStatus("已打开系统安装程序", Ui.ACCENT);
+                appUpdatePage.setHint("请在弹出的系统界面中确认安装；取消安装会回到本页面");
+                appUpdatePage.setExitVisible(true);
+                break;
+            case APP_UPDATE_FAILED:
+                appUpdatePage.setIndeterminate(false);
+                appUpdatePage.setStatus("更新失败", Ui.ERROR);
+                appUpdatePage.setHint(appUpdateFailure);
+                appUpdatePage.setExitVisible(true);
+                break;
+            default:
+                appUpdatePage.setIndeterminate(false);
+                appUpdatePage.setProgress(0);
+                appUpdatePage.setStatus("正在准备下载…", Ui.TEXT);
+                appUpdatePage.setExitVisible(false);
+                break;
+        }
+    }
+
+    private void setAppUpdateProgress(int percent) {
+        if (appUpdatePage == null) return;
+        appUpdatePage.setIndeterminate(false);
+        appUpdatePage.setProgress(percent);
+    }
+
+    private void failAppUpdate(String message) {
+        appUpdateFailure = message;
+        appUpdatePhase = APP_UPDATE_FAILED;
+        showAppUpdatePage();
+        updateAppUpdatePageUi();
+    }
+
+    /** 关闭更新页面，回到进入前的界面。 */
+    private void finishAppUpdatePage(String toast) {
+        appUpdatePageVisible = false;
+        appUpdatePhase = APP_UPDATE_IDLE;
+        appUpdateFailure = "";
+        if (toast != null && !toast.isEmpty()) {
+            Toast.makeText(this, toast, Toast.LENGTH_LONG).show();
+        }
+        if (settingsVisible) {
+            showSettingsPageOf(settingsPage);
+        } else {
+            showMain();
+        }
+    }
+
+    private void exitAppUpdatePage() {
+        if (appUpdatePhase == APP_UPDATE_DOWNLOADING) {
+            Toast.makeText(this, "正在下载更新，请稍候", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        finishAppUpdatePage(null);
+    }
+
+    private void downloadAndInstall(String downloadUrl) {
+        appUpdatePhase = APP_UPDATE_DOWNLOADING;
+        showAppUpdatePage();
+        setAppUpdateProgress(0);
+        updateAppUpdatePageUi();
 
         new AsyncTask<Void, Integer, Object>() {
+            private String failure;
+
             @Override
             protected Object doInBackground(Void... params) {
                 FileOutputStream fos = null;
@@ -964,13 +1517,20 @@ public final class MainActivity extends Activity {
                         }
                     }
                     fos.close();
+                    fos = null;
                     in.close();
+                    in = null;
                     conn.disconnect();
 
+                    if (downloaded <= 0) {
+                        failure = "下载内容为空，请稍后重试";
+                        return null;
+                    }
                     return apkFile;
                 } catch (Exception e) {
                     android.util.Log.e("AutoPlay", "download error", e);
-                    return "下载失败: " + e.getMessage();
+                    failure = "下载失败：" + e.getMessage();
+                    return null;
                 } finally {
                     try { if (fos != null) fos.close(); } catch (IOException ignored) {}
                     try { if (in != null) in.close(); } catch (IOException ignored) {}
@@ -979,20 +1539,20 @@ public final class MainActivity extends Activity {
 
             @Override
             protected void onProgressUpdate(Integer... values) {
-                progressBar.setProgress(values[0]);
-                statusText.setText("正在下载更新... " + values[0] + "%");
+                setAppUpdateProgress(values[0]);
             }
 
             @Override
             protected void onPostExecute(Object result) {
                 if (result instanceof File) {
+                    appUpdatePhase = APP_UPDATE_READY;
+                    updateAppUpdatePageUi();
                     installApk((File) result);
                 } else {
-                    Toast.makeText(MainActivity.this, (String) result, Toast.LENGTH_LONG).show();
-                    showSettings();
+                    failAppUpdate(failure == null ? "下载失败，请稍后重试" : failure);
                 }
             }
-        }.execute();
+        }.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
     }
 
     private void installApk(File apkFile) {
@@ -1011,10 +1571,11 @@ public final class MainActivity extends Activity {
 
         try {
             startActivityForResult(intent, REQUEST_INSTALL_PACKAGE);
+            appUpdatePhase = APP_UPDATE_INSTALLING;
+            updateAppUpdatePageUi();
         } catch (Exception e) {
             android.util.Log.e("AutoPlay", "install error", e);
-            Toast.makeText(this, "无法安装: " + e.getMessage(), Toast.LENGTH_LONG).show();
-            showSettings();
+            failAppUpdate("无法打开安装程序：" + e.getMessage());
         }
     }
 
@@ -1022,8 +1583,10 @@ public final class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_INSTALL_PACKAGE) {
-            // User may have cancelled the install
-            showSettings();
+            // 安装成功时进程会被替换；能回到这里说明用户取消了安装。
+            if (appUpdatePageVisible) {
+                finishAppUpdatePage("已取消安装");
+            }
         }
     }
 
@@ -1152,6 +1715,11 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    /** Android 键码转状态机标识，与厂家广播码（如 {@code "VR"}）共存于同一套字符串键。 */
+    private static String androidKeyId(int keyCode) {
+        return "key:" + keyCode;
+    }
+
     private void cancelBootNotification() {
         android.app.NotificationManager manager = (android.app.NotificationManager)
                 getSystemService(Context.NOTIFICATION_SERVICE);
@@ -1162,7 +1730,10 @@ public final class MainActivity extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        int command = connectionService == null ? -1 : connectionService.mediaCommand(event.getKeyCode());
+        int command = connectionService == null ? -1
+                : connectionService.mediaCommand(event.getKeyCode());
+        int longCommand = connectionService == null ? -1
+                : connectionService.mediaCommand(event.getKeyCode(), true);
         if (settingsVisible && settingsPage == PAGE_STEERING) {
             screens.recordSteeringKey(event, command);
         }
@@ -1173,28 +1744,47 @@ public final class MainActivity extends Activity {
                 && screens.handleSteeringKey(event)) {
             return true;
         }
-        if (command >= 0 && phonePlugged && protocolSession != null) {
+        if ((command >= 0 || longCommand >= 0) && phonePlugged && protocolSession != null) {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
                 if (event.getRepeatCount() == 0) {
-                    return connectionService != null
-                            && connectionService.sendSteeringCommand(command, "android");
+                    if (longCommand < 0) {
+                        // 只绑定了单击：按下立即执行，保持原有响应速度
+                        return connectionService != null
+                                && connectionService.sendSteeringCommand(command, "android");
+                    }
+                    // 已绑定长按：占位后启动计时器，满 800ms 自动触发，无需等松手
+                    uiHandler.removeCallbacks(steeringLongPressTask);
+                    steeringPress.begin(androidKeyId(event.getKeyCode()), command, longCommand,
+                            android.os.SystemClock.elapsedRealtime());
+                    uiHandler.postDelayed(steeringLongPressTask, SteeringProtocol.LONG_PRESS_MS);
                 }
                 return true;
             }
-            return event.getAction() == KeyEvent.ACTION_UP || super.dispatchKeyEvent(event);
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                if (!steeringPress.isPressed(androidKeyId(event.getKeyCode()))) {
+                    return super.dispatchKeyEvent(event);
+                }
+                uiHandler.removeCallbacks(steeringLongPressTask);
+                boolean longFired = steeringPress.isLongFired();
+                long held = steeringPress.heldMs(android.os.SystemClock.elapsedRealtime());
+                int action = steeringPress.finish(android.os.SystemClock.elapsedRealtime());
+                if (longFired) {
+                    android.util.Log.i("AutoPlayKeys", "dispatch held=" + held
+                            + "ms already fired long press, skip single");
+                    return true;
+                }
+                android.util.Log.i("AutoPlayKeys", "dispatch held=" + held + "ms single=" + action);
+                if (action >= 0 && connectionService != null) {
+                    connectionService.sendSteeringCommand(action, "android");
+                }
+                return true;
+            }
+            return true;
         }
         return super.dispatchKeyEvent(event);
     }
 
-    void onConnectModeChanged() {
-        refreshConnectionSettings();
-    }
-
     void onNightModeChanged() {
-        refreshConnectionSettings();
-    }
-
-    void onMicSourceChanged() {
         refreshConnectionSettings();
     }
 

@@ -13,6 +13,8 @@ AutoPlay 车载盒子 Android 应用，提供 CarPlay 投屏、音频播放和�
 - **音频与控制**：PCM 播放、麦克风上行、媒体按键、方控学习（含长安 CS35Plus 协议）。
 - **后台连接**：前台服务维持连接和音频。
 - **界面**：深色/浅色/跟随系统主题，夜间模式支持大灯联动（长安车机）。
+- **盒子固件升级**：从 `api.paplink.cn` 检查并下载固件，经 USB 下发到盒子，实时显示进度。
+- **统一升级页面**：盒子固件与软件更新共用全屏进度页，状态、配色与退出规则一致。
 - **高级功能**：连续点击版本号四次解锁，含 Root 语音禁用等。
 
 ## 使用
@@ -20,8 +22,14 @@ AutoPlay 车载盒子 Android 应用，提供 CarPlay 投屏、音频播放和�
 1. 安装应用，连接 USB 盒子（VID `0x1314`，PID `0x1520` / `0x1521`）。
 2. 授予 USB 权限，按需授予麦克风权限。
 3. 通过盒子连接手机，等待进入 CarPlay。
+4. 设置 → 点击 **盒子版本** 可检查并升级盒子固件；升级时自动进入全屏进度页，完成后等待盒子重启再自动退出（升级中请勿断电）。
 
 错误日志：**设置 → 更多设置 → 错误日志**。
+
+## 相关文档
+
+- `docs/box-protocol.md`：盒子 USB 协议完整命令表与帧格式
+- `postman/`：固件接口的 Postman 集合与测试说明
 
 ## 构建
 
@@ -31,3 +39,28 @@ AutoPlay 车载盒子 Android 应用，提供 CarPlay 投屏、音频播放和�
 gradle assembleDebug        # APK: app/build/outputs/apk/debug/
 ./build-apk.sh              # APK: build/manual/AutoPlayReplacement-debug.apk
 ```
+
+`build-apk.sh` 会为每次构建生成：
+
+- `versionName`：`YYYY.MM.DD.HHMM`（东八区时间）
+- `versionCode`：`YYMMDDHH`（8 位，单调递增且不溢出 int）
+
+## 发布更新
+
+在线更新读取仓库根目录的 `update.json`：
+
+```json
+{
+  "version": "2026.11.13.1700",
+  "versionCode": 2,
+  "url": "https://github.com/<owner>/<repo>/releases/latest/download/AutoPlayReplacement-debug.apk",
+  "notes": "更新说明"
+}
+```
+
+发布时必须让 `version` **大于** 已安装版本的 `versionName`。客户端判断规则：
+
+- 两侧 `version` 都符合 `YYYY.MM.DD.HHMM` → 以版本号字符串为准（推荐，构建脚本自动生成）
+- 任一格式不符 → 退回比较 `versionCode`
+
+> 历史问题：`versionCode` 曾硬编码为 1，而 `update.json` 写 2，导致新构建的版本被提示「升级」到更旧的版本。现已改为以 `versionName` 为主、`versionCode` 仅兜底；`build-apk.sh` 也会动态生成 `versionCode`。

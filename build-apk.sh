@@ -21,6 +21,10 @@ if [ ! -f "$ANDROID_JAR" ]; then
 fi
 
 BUILD_VERSION=$(TZ=Asia/Shanghai date '+%Y.%m.%d.%H%M')
+# versionCode 必须单调递增，供系统升级与在线更新判断使用。
+# 8 位 YYMMDDHH，既小于 int 上限（2147483647），又保证到 2099 年都不回绕；
+# 小时级精度意味着同一小时内多次构建会得到相同 code，仅影响覆盖安装识别。
+BUILD_VERSION_CODE=$(TZ=Asia/Shanghai date '+%y%m%d%H')
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/classes" "$OUT_DIR/dex" "$OUT_DIR/native"
@@ -50,7 +54,7 @@ java -cp "$OUT_DIR/test-classes:$OUT_DIR/classes:$ANDROID_JAR" \
     -I "$ANDROID_JAR" \
     --min-sdk-version 19 \
     --target-sdk-version 35 \
-    --version-code 1 \
+    --version-code "$BUILD_VERSION_CODE" \
     --version-name "$BUILD_VERSION" \
     --rename-manifest-package cn.autoplay.replacement \
     -F "$OUT_DIR/base.apk"

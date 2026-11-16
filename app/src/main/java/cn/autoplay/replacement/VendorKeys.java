@@ -11,6 +11,16 @@ final class VendorKeys {
         return "NEXT".equals(code) || "PRE".equals(code) || "VR".equals(code) || "MAIN".equals(code);
     }
 
+    /**
+     * 是否支持区分单击/长按。
+     *
+     * <p>只有语音键做长按：DOWN/UP 成对到达，可测按住时长。MAIN 是触摸按钮，
+     * 只有按下事件，无法计时，因此不支持长按。
+     */
+    static boolean supportsLongPress(String code) {
+        return "VR".equals(code);
+    }
+
     static boolean stateSupported(String state) {
         return "DOWN".equals(state) || "UP".equals(state);
     }

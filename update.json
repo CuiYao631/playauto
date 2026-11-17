@@ -1,6 +1,6 @@
 {
-  "version": "2026.11.17.1410",
+  "version": "2026.11.17.1421",
   "versionCode": 26111714,
   "url": "https://github.com/CuiYao631/playauto/releases/latest/download/AutoPlayReplacement-debug.apk",
-  "notes": "feat: 支持删除盒子已配对手机；修复更新时签名不一致\n\ncmd 18 写回（配对列表）：\n- BoxProtocolSession: createPairedListPayload() 按下发格式生成\n  「MAC+名称\\n」×n + \\0；sendPairedDeviceList() / removePairedDevice()\n  写回并同步本地缓存\n- ConnectionService.removePairedDevice()\n- 设置 → 更多设置 → 盒子配置 →「删除已配对手机」，选中后二次确认\n- 名称内的换行会被压平，避免盒子把一条记录拆成两条\n- 自测：写回格式、往返一致、空列表、非法条目丢弃、换行压平\n\n签名修复（在线更新提示「签名不一致」）：\n根因是 build-apk.sh 在 build/debug.keystore 缺失时自动生成密钥，而\nbuild/ 与 *.keystore 都被 gitignore，导致 CI 每次构建都用新密钥。\n实测三个版本证书各不相同（709e7f24 / 5dac7e26 / 本地 ba4f8b09），\nAndroid 因此拒绝覆盖安装（INSTALL_FAILED_UPDATE_INCOMPATIBLE）。\n\n- 固定密钥移入仓库：keys/playauto.keystore（alias androiddebugkey）\n- .gitignore 增加 !keys/playauto.keystore 例外\n- build-apk.sh 改为使用固定密钥，缺失时直接报错并打印生成命令，\n  不再静默生成；支持 PLAYAUTO_KEYSTORE / KEY_ALIAS / KS_PASS / KEY_PASS 覆盖\n- README 补充签名章节与历史问题说明\n\ndocs: 标注 cmd 44 副屏（仪表投射）不实现\n- 实测容器固件 supportFeatures 不含 naviScreen，盒子不会下发 cmd 44\n- cmd 25 的 naviScreenInfo 一并放弃；dev 分支保留完整实现备查\n"
+  "notes": "1.添加功能手动断开连接\n"
 }

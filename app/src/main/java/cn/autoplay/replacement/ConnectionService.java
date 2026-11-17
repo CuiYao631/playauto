@@ -673,6 +673,20 @@ public final class ConnectionService extends Service {
         return current.getPairedDevices();
     }
 
+    /**
+     * 从盒子的已配对列表里删除一台手机（{@code CMD_BLUETOOTH_PAIR_LIST} 18 回写）。
+     *
+     * @param mac 目标手机的蓝牙地址
+     */
+    boolean removePairedDevice(String mac) {
+        BoxProtocolSession current = session;
+        if (current == null) {
+            setBoxStatus("盒子：未连接，无法修改配对列表");
+            return false;
+        }
+        return current.removePairedDevice(mac);
+    }
+
     void syncCarLogo() {
         BoxProtocolSession current = session;
         if (current == null) return;

@@ -154,7 +154,7 @@ USB 层不做任何加解密，字节流原样收发。
 | 25 | `CMD_BOX_INFO` | N | 盒子信息串（uuid / mfd / model 等） |
 | 42 | `CMD_DASHBOARD_DATA` | N | 仪表数据，`1`=文本 `2/3`=封面图 `100/200`=JSON `202/203`=原始 |
 | 43 | `CMD_CONNECTION_PIN_CODE` | 4 + N | 手机类型 + 连接 PIN 码（**仅 HiCar/Carlink 使用，不实现**） |
-| 44 | `CMD_DASHBOARD_FRAME` | 20 + N | 副屏视频帧 |
+| 44 | `CMD_DASHBOARD_FRAME` | 20 + N | 副屏视频帧（**容器固件不支持副屏，不实现**） |
 | 119 | `CMD_APP_RESET` | 4 B | 要求 App 重置 |
 | 136 | `CMD_DEBUG_TEST` | 4 B | 调试 |
 | 153 | `CMD_FILE` | 见 §8 | 从盒子拉取文件（log / apk） |
@@ -422,7 +422,7 @@ sequenceDiagram
 | 6 `CMD_VIDEO_FRAME` | ✅ 含 ≥`2024.12.13.1130` 的时间戳分支 |
 | 7 `CMD_AUDIO_FRAME` | ✅ |
 | 13 / 14 盒子名称 | ✅ |
-| 18 `BLUETOOTH_PAIR_LIST` | ✅ 解析为 (MAC, 名称) 列表，供 cmd 17 选择 |
+| 18 `BLUETOOTH_PAIR_LIST` | ✅ 解析为 (MAC, 名称) 列表，供 cmd 17 选择；长按删除已由 cmd 18 回写支持 |
 | 23 `MULTI_TOUCH` | ✅ |
 | 25 `CMD_BOX_INFO` | ✅ **本次新增**，解析 uuid / MFD / productType / fileName |
 | 42 仪表数据 | ✅ |
@@ -434,10 +434,12 @@ sequenceDiagram
 | 240 `ENABLE_CRYPT` | ✅ 含 native `stCheck` |
 | **206 `BOX_REBOOT`** | ✅ **本次新增**：升级成功（187=2/6）后自动下发，另可在设置页手动触发 |
 | **17 `AUTO_CONN_BT_ADDR`** | ✅ 设置 → 更多设置 → 盒子配置 →「指定回连手机」；列表来自 cmd 18 |
+| **18 写回** | ✅ 设置 → 更多设置 → 盒子配置 →「删除已配对手机」；回写格式同下发（`MAC+名称\n` + `\0`） |
 | 10 `BLUETOOTH_ADDR` | ⛔ **不实现**：来源是私有广播 `AUTO_BOX_CONTROL_CMD_EVT`，常安车机不发送 |
 | 19 / 24 / 43 / 8-1013 | ⛔ **不实现**：HiCar/Carlink 相关，常安车机已确认无此功能 |
 | 22 `CAMERA_INFO` | ⛔ **不实现**：车机无摄像头，且不属于 CarPlay 功能 |
 | 8 上报的 `7/8/15` | ⛔ **不实现**：麦克风固定车载，不参与来源协商 |
+| 44 `DASHBOARD_FRAME` | ⛔ **不实现**：容器固件不支持副屏（`supportFeatures` 不含 `naviScreen`） |
 
 ### 未实现清单
 
@@ -446,7 +448,6 @@ sequenceDiagram
 | cmd | 名称 | 备注 |
 |---|---|---|
 | 11 | `CMD_CARPLAY_MODE_CHANGE` | 28 B，7 个 int（显示模式/边距等） |
-| 44 | `CMD_DASHBOARD_FRAME` | 副屏 H.264 帧 |
 | 119 | `CMD_APP_RESET` | 要求 App 重置 |
 | 136 | `CMD_DEBUG_TEST` | 仅打日志 |
 | 153 | `CMD_FILE`（盒子→主机） | 拉 log / apk；playAuto 只实现主机→盒子写入 |
@@ -459,7 +460,6 @@ sequenceDiagram
 |---|---|---|
 | 5 | `CMD_TOUCH`（旧式单指） | 原版由 `BoxInterface._o0o_OoO_0O_Oo_()` 供另一条触控路径使用；playAuto 一律走 23 `MULTI_TOUCH` |
 | 15 | `CMD_MANUAL_DISCONNECT` | 主机主动断开手机；playAuto 未提供入口 |
-| 18 | `BLUETOOTH_PAIR_LIST`（写回） | 原版长按删除某条后回写新列表 |
 | 160 | `APP_INFO` | version/code/uuid/size/model/platform/android/huid/language/brand/year/so 大段 JSON |
 
 明确不做（车机不支持）：
@@ -472,13 +472,14 @@ sequenceDiagram
 | 43 | `CONNECTION_PIN_CODE` | **已确认无 HiCar**（原版仅 phoneType 6/7 = HiCar/Carlink） |
 | 22 | `CAMERA_INFO`（收发两侧） | **车机无摄像头**，不属于 CarPlay 功能 |
 | 8 上报 `7/8/15` | 麦克风来源协商 | **麦克风固定车载**，不属于 CarPlay 功能 |
+| 44 | `DASHBOARD_FRAME`（副屏） | **已实测盒子固件不提供副屏能力**，`supportFeatures` 无 `naviScreen` |
 
 半实现项：
 
 - `42 CMD_DASHBOARD_DATA` 只处理 subtype `200`（导航 JSON）；缺 `1` 文本、`2/3` 封面图、`100` JSON、`202/203` 原始
 - `8 CMD_CARPLAY` 上报缺 `500/501`（断连/重连提示）、`1000`（支持 WiFi）、`1003~1006`、`1011/1012`（需 KO）；`7/8/15` 麦克风协商按上表不做
 - `6 CMD_VIDEO_FRAME` 的 `flags` 解析出来但未使用：`bit2-3` 压缩方式因固定 H.264 无需切换；`bit0` 熄屏编码未处理（原版广播 10/11）
-- `25 CMD_BOX_SETTINGS` 只发 4 个单键 JSON；缺 `naviScreenInfo`（HUD 安全区）、`ViewAreaInfo`（多窗口）、`cornerMasks`、`MapThemeMode`、`GNSSCapability`、`fps/dpi/尺寸`
+- `25 CMD_BOX_SETTINGS` 只发 4 个单键 JSON；缺 `naviScreenInfo`（副屏画布，随 cmd 44 一并放弃）、`ViewAreaInfo`（多窗口）、`cornerMasks`、`MapThemeMode`、`GNSSCapability`、`fps/dpi/尺寸`
 - `4 CMD_PLUGOUT` 未区分值 `1`（手机端主动断开）
 - `1 CMD_OPEN` 收到空负载时不会按原版重发 `g_Open`
 - 未知命令被静默丢弃，无日志

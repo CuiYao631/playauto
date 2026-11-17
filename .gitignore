@@ -7,5 +7,8 @@
 .DS_Store
 *.keystore
 *.jks
+# 应用签名密钥必须固定，否则在线更新会因证书不一致无法覆盖安装。
+# 这是明文口令为 android 的演示密钥，不用于商店分发，因此提交进仓库。
+!keys/playauto.keystore
 .env
 .env.*

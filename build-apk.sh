@@ -74,18 +74,29 @@ if [ -d "$PROJECT_DIR/app/src/main/jniLibs" ]; then
 fi
 "$BUILD_TOOLS/zipalign" -f 4 "$OUT_DIR/base.apk" "$OUT_DIR/aligned.apk"
 
-KEYSTORE="$PROJECT_DIR/build/debug.keystore"
-mkdir -p "$PROJECT_DIR/build"
+# 签名密钥必须固定，否则每次构建的证书都不同，Android 会拒绝覆盖安装
+# （INSTALL_FAILED_UPDATE_INCOMPATIBLE，即应用内更新显示“签名不一致”）。
+# 默认使用仓库内 keys/playauto.keystore；CI 可通过环境变量指向自己的密钥。
+KEYSTORE=${PLAYAUTO_KEYSTORE:-"$PROJECT_DIR/keys/playauto.keystore"}
+KEY_ALIAS=${PLAYAUTO_KEY_ALIAS:-androiddebugkey}
+KS_PASS=${PLAYAUTO_KS_PASS:-android}
+KEY_PASS=${PLAYAUTO_KEY_PASS:-android}
+
 if [ ! -f "$KEYSTORE" ]; then
-    keytool -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android \
-        -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
-        -keyalg RSA -keysize 2048 -validity 10000
+    echo "缺少签名密钥：$KEYSTORE" >&2
+    echo "请先执行：" >&2
+    echo "  keytool -genkeypair -keystore \"$KEYSTORE\" -storepass android -keypass android \\" >&2
+    echo "      -alias $KEY_ALIAS -dname \"CN=PlayAuto,O=PlayAuto,C=CN\" \\" >&2
+    echo "      -keyalg RSA -keysize 2048 -validity 10000" >&2
+    echo "生成的密钥请妥善备份：一旦更换，已安装的应用必须卸载后才能重装。" >&2
+    exit 1
 fi
+
 "$BUILD_TOOLS/apksigner" sign \
     --ks "$KEYSTORE" \
-    --ks-key-alias androiddebugkey \
-    --ks-pass pass:android \
-    --key-pass pass:android \
+    --ks-key-alias "$KEY_ALIAS" \
+    --ks-pass "pass:$KS_PASS" \
+    --key-pass "pass:$KEY_PASS" \
     --out "$OUT_DIR/AutoPlayReplacement-debug.apk" "$OUT_DIR/aligned.apk"
 "$BUILD_TOOLS/apksigner" verify --verbose "$OUT_DIR/AutoPlayReplacement-debug.apk"
 printf 'Built: %s\n' "$OUT_DIR/AutoPlayReplacement-debug.apk"

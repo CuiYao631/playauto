@@ -1207,6 +1207,97 @@ public final class BoxProtocolSession implements AutoCloseable {
         return pairedDevices;
     }
 
+    /**
+     * 构造写回盒子的已配对列表负载（{@code CMD_BLUETOOTH_PAIR_LIST} 18）。
+     *
+     * <p>格式与盒子下发时一致：每行「17 字符 MAC + 设备名 + {@code \n}」，
+     * 整体以 {@code \0} 结尾。原版 {@code O00o_OooO___OOo_} 长按删除某条后
+     * 就是用这个格式回写的。
+     */
+    static byte[] createPairedListPayload(List<PairedDevice> devices) {
+        StringBuilder builder = new StringBuilder();
+        if (devices != null) {
+            for (PairedDevice device : devices) {
+                if (device == null || !isValidBluetoothMac(device.getMac())) {
+                    continue;
+                }
+                String name = device.getName() == null ? "" : device.getName();
+                // 名称里不能带换行，否则盒子会把它当成另一条记录
+                name = name.replace('\r', ' ').replace('\n', ' ');
+                builder.append(device.getMac().toUpperCase(java.util.Locale.ROOT))
+                        .append(name)
+                        .append('\n');
+            }
+        }
+        builder.append('\0');
+        return builder.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 把已配对列表写回盒子（{@code CMD_BLUETOOTH_PAIR_LIST} 18）。
+     *
+     * <p>盒子以主机下发的列表为准，因此删除条目只需回写一份新列表。
+     *
+     * @return 指令是否写入 USB（不代表盒子已接受）
+     */
+    public boolean sendPairedDeviceList(List<PairedDevice> devices) {
+        if (closed || !protocolReady) {
+            publish("写回配对列表失败：协议未就绪");
+            return false;
+        }
+        List<PairedDevice> snapshot = devices == null
+                ? Collections.emptyList()
+                : Collections.unmodifiableList(new ArrayList<>(devices));
+        byte[] payload = createPairedListPayload(snapshot);
+        try {
+            writeFrame(ProtocolFrame.encode(CMD_BLUETOOTH_PAIR_LIST, payload, cryptEnabled, nonce));
+            pairedDevices = snapshot;
+            pairedDeviceCount = snapshot.size();
+            publish("已把配对列表写回盒子：" + pairedDeviceCount + " 台");
+            if (listener != null) {
+                listener.onPairedDevices(snapshot);
+            }
+            return true;
+        } catch (IOException exception) {
+            publish("写回配对列表失败：" + exception.getMessage());
+            if (listener != null) listener.onError("写回配对列表失败", exception);
+            return false;
+        }
+    }
+
+    /**
+     * 从已配对列表里删除某一台手机并回写盒子。
+     *
+     * @param mac 目标手机的蓝牙地址
+     * @return 指令是否写入 USB；地址不存在时返回 {@code false}
+     */
+    public boolean removePairedDevice(String mac) {
+        if (!isValidBluetoothMac(mac)) {
+            publish("删除配对失败：蓝牙地址格式不正确");
+            return false;
+        }
+        String target = mac.toUpperCase(java.util.Locale.ROOT).replace('-', ':');
+        List<PairedDevice> remaining = new ArrayList<>();
+        boolean found = false;
+        for (PairedDevice device : pairedDevices) {
+            if (device.getMac().equalsIgnoreCase(target)) {
+                found = true;
+                continue;
+            }
+            remaining.add(device);
+        }
+        if (!found) {
+            publish("删除配对失败：列表里没有 " + target);
+            return false;
+        }
+        boolean sent = sendPairedDeviceList(remaining);
+        if (sent && remaining.isEmpty()) {
+            // 列表清空后自动连接不可用，需同步状态
+            autoConnectRequested = false;
+        }
+        return sent;
+    }
+
     private void maybeAutoConnect() {
         if (!protocolReady || !boxSupportsAutoConnect || !autoConnectEnabled
                 || pairedDeviceCount <= 0 || phoneWorking || bluetoothConnected

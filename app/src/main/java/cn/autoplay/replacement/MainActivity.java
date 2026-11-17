@@ -1753,6 +1753,54 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    /**
+     * 删除盒子里的一台已配对手机（{@code CMD_BLUETOOTH_PAIR_LIST} 18 回写）。
+     *
+     * <p>盒子以主机下发的列表为准，因此删除等价于「把去掉这一台之后的新列表写回盒子」。
+     */
+    void showPairedDeviceRemoval() {
+        ConnectionService service = connectionService;
+        if (service == null) {
+            Toast.makeText(this, "请先连接盒子", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        java.util.List<BoxProtocolSession.PairedDevice> devices = service.pairedDevices();
+        if (devices.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("删除已配对手机")
+                    .setMessage("盒子还没有上报已配对手机列表。请确认手机上已完成过一次"
+                            + "与盒子蓝牙的配对，然后重新插拔盒子。")
+                    .setPositiveButton("知道了", null)
+                    .show();
+            return;
+        }
+        String[] labels = new String[devices.size()];
+        for (int index = 0; index < devices.size(); index++) {
+            labels[index] = devices.get(index).toString();
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("删除已配对手机")
+                .setItems(labels, (dialog, which) -> {
+                    BoxProtocolSession.PairedDevice device = devices.get(which);
+                    new AlertDialog.Builder(this)
+                            .setTitle("删除配对")
+                            .setMessage("将从盒子的已配对列表中删除：\n" + device
+                                    + "\n\n删除后盒子不会再自动回连这台手机，"
+                                    + "需要时可在手机上重新配对。")
+                            .setPositiveButton("删除", (confirm, ignored) -> {
+                                boolean sent = service.removePairedDevice(device.getMac());
+                                Toast.makeText(this, sent
+                                        ? "已从盒子删除 " + device
+                                        : "删除失败，请检查盒子连接",
+                                        Toast.LENGTH_LONG).show();
+                            })
+                            .setNegativeButton("取消", null)
+                            .show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     void showBackgroundConnectionHelp() {
         new AlertDialog.Builder(this)
                 .setTitle("后台连接")

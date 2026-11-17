@@ -65,3 +65,18 @@ gradle assembleDebug        # APK: app/build/outputs/apk/debug/
 - 任一格式不符 → 退回比较 `versionCode`
 
 > 历史问题：`versionCode` 曾硬编码为 1，而 `update.json` 写 2，导致新构建的版本被提示「升级」到更旧的版本。现已改为以 `versionName` 为主、`versionCode` 仅兜底；`build-apk.sh` 也会动态生成 `versionCode`。
+
+## 签名
+
+所有构建**必须**使用同一份密钥，否则 Android 会拒绝覆盖安装（应用内更新提示
+「签名不一致」/ `INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。
+
+- 固定密钥：`keys/playauto.keystore`（别名 `androiddebugkey`，口令 `android`），
+  已随仓库提交，CI 与本地共用
+- 可用环境变量覆盖：`PLAYAUTO_KEYSTORE` / `PLAYAUTO_KEY_ALIAS` /
+  `PLAYAUTO_KS_PASS` / `PLAYAUTO_KEY_PASS`
+- 密钥丢失或更换后，已安装的应用必须先卸载才能重装；请自行备份该文件
+
+> 历史问题：脚本原先在 `build/debug.keystore` 不存在时自动生成密钥，而 `build/`
+> 与 `*.keystore` 都被 gitignore，导致 **CI 每次构建都生成新密钥**，每个 release
+> 的证书都不同（曾实测到 3 个不同指纹），在线更新必然失败。

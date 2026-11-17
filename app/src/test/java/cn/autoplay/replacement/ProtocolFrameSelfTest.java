@@ -362,6 +362,40 @@ public final class ProtocolFrameSelfTest {
         BoxProtocolSession.PairedDevice nameless =
                 BoxProtocolSession.parseBluetoothPairList("AA:BB:CC:DD:EE:FF\n").get(0);
         check(nameless.toString().equals("AA:BB:CC:DD:EE:FF"), "nameless device shows mac");
+
+        // 写回格式与下发格式一致：每行「MAC + 名称 + \n」，整体以 \0 结尾
+        java.util.List<BoxProtocolSession.PairedDevice> twoDevices = devices;
+        byte[] writeBack = BoxProtocolSession.createPairedListPayload(twoDevices);
+        String text = new String(writeBack, StandardCharsets.UTF_8);
+        check(text.equals("AA:BB:CC:DD:EE:FFiPhone 15\n11:22:33:44:55:66Mate 60 Pro\n\0"),
+                "pair list write-back matches read format");
+        check(text.endsWith("\0"), "pair list write-back ends with nul");
+
+        // 写回内容能被自己的解析器读回（往返一致）
+        java.util.List<BoxProtocolSession.PairedDevice> roundTrip =
+                BoxProtocolSession.parseBluetoothPairList(text);
+        check(roundTrip.size() == 2, "write-back round-trips device count");
+        check(roundTrip.get(1).getMac().equals("11:22:33:44:55:66"), "round-trip mac");
+        check(roundTrip.get(1).getName().equals("Mate 60 Pro"), "round-trip name");
+
+        // 空列表只发一个 \0；非法 MAC 的条目被跳过
+        check(new String(BoxProtocolSession.createPairedListPayload(null), StandardCharsets.UTF_8)
+                .equals("\0"), "empty pair list payload is single nul");
+        check(new String(BoxProtocolSession.createPairedListPayload(
+                BoxProtocolSession.parseBluetoothPairList("ZZ:BB:CC:DD:EE:FFbad\n")),
+                StandardCharsets.UTF_8).equals("\0"), "invalid entries dropped on write-back");
+
+        // 名称里的换行必须被替换，否则盒子会拆成两条记录
+        BoxProtocolSession.PairedDevice injected =
+                BoxProtocolSession.parseBluetoothPairList("AA:BB:CC:DD:EE:FFname\n").get(0);
+        BoxProtocolSession.PairedDevice multiline = new BoxProtocolSession.PairedDevice(
+                injected.getMac(), "car\r\nphone");
+        String sanitized = new String(BoxProtocolSession.createPairedListPayload(
+                java.util.Collections.singletonList(multiline)), StandardCharsets.UTF_8);
+        check(sanitized.equals("AA:BB:CC:DD:EE:FFcar  phone\n\0"),
+                "newlines in device name are flattened");
+        check(BoxProtocolSession.parseBluetoothPairList(sanitized).size() == 1,
+                "flattened name keeps a single record");
     }
 
     private static void testBoxFirmwarePayload() throws Exception {

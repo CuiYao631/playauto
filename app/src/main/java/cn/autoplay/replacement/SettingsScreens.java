@@ -181,6 +181,7 @@ final class SettingsScreens {
                 value -> host.onBoxSettingsChanged(), host::showRebootAfterUpgradeHelp);
         navigationRow("立即重启盒子", host::onRebootBoxTapped);
         navigationRow("指定回连手机", host::showAutoConnectDevicePicker);
+        navigationRow("删除已配对手机", host::showPairedDeviceRemoval);
 
         if (host.advancedFeaturesUnlocked()) {
             section("高级功能");

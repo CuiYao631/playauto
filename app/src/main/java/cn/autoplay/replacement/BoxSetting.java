@@ -70,6 +70,32 @@ final class BoxSetting {
         return new BoxSetting(25, "{\"DashboardInfo\":7}".getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * 副屏画面信息（{@code CMD_BOX_SETTINGS} 25 的 {@code naviScreenInfo}）。
+     *
+     * <p>字段与原版 {@code O0o0o_O(Rect, int, int)} 一致：{@code fps}/{@code dpi} 是投屏
+     * 参数，{@code width}/{@code height} 是整屏尺寸，{@code safearea} 是允许盒子绘制的
+     * 区域。playAuto 用悬浮窗模拟副屏，两者取同一矩形。
+     */
+    static BoxSetting naviScreenInfo(int widthPx, int heightPx, int fps, int dpi) {
+        if (widthPx <= 0 || heightPx <= 0) {
+            throw new IllegalArgumentException("副屏尺寸必须为正数");
+        }
+        int safeFps = fps <= 0 || fps > 60 ? 30 : fps;
+        int safeDpi = dpi <= 0 ? 160 : dpi;
+        String json = "{\"naviScreenInfo\":{"
+                + "\"fps\":" + safeFps + ","
+                + "\"dpi\":" + safeDpi + ","
+                + "\"width\":" + widthPx + ","
+                + "\"height\":" + heightPx + ","
+                + "\"safearea\":{"
+                + "\"width\":" + widthPx + ","
+                + "\"height\":" + heightPx + ","
+                + "\"x\":0,\"y\":0,\"outside\":1"
+                + "}}}";
+        return new BoxSetting(25, json.getBytes(StandardCharsets.UTF_8));
+    }
+
     static BoxSetting audioTransfer(boolean enabled) {
         return carPlay(enabled ? 22 : 23);
     }

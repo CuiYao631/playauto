@@ -63,6 +63,8 @@ public final class ConnectionService extends Service {
     private PowerManager.WakeLock wakeLock;
     private MediaControls mediaSession;
     private Client client;
+    /** 用悬浮窗模拟的副屏，承载 CMD_DASHBOARD_FRAME(44)。 */
+    private SecondaryScreenOverlay secondaryScreen;
     private volatile boolean clientVisible;
     private boolean foreground;
     private boolean microphoneForeground;
@@ -593,6 +595,22 @@ public final class ConnectionService extends Service {
                     if (client != null && clientVisible) client.onVideoFrame(frame);
                 });
             }
+            @Override public void onDashboardFrame(VideoFrame frame) {
+                // 副屏窗口常驻，不受主界面可见性影响；帧直接投递到解码队列，
+                // 避免每帧都经主线程 Handler 中转。
+                SecondaryScreenOverlay overlay = secondaryScreen;
+                if (overlay != null && overlay.isShowing()) {
+                    overlay.submitFrame(frame);
+                    return;
+                }
+                dispatch(epoch, () -> {
+                    if (generation != epoch) return;
+                    if (!prefs().getBoolean(SecondaryScreenOverlay.PREF_ENABLED, false)) return;
+                    showSecondaryScreen();
+                    SecondaryScreenOverlay created = secondaryScreen;
+                    if (created != null && created.isShowing()) created.submitFrame(frame);
+                });
+            }
             @Override public void onAudioFrame(AudioFrame frame) {
                 if (generation == epoch) sessionPlayback.submit(frame);
             }
@@ -793,6 +811,81 @@ public final class ConnectionService extends Service {
         return current.requestManualDisconnect();
     }
 
+    // ---- 副屏悬浮窗 ----
+
+    /** 按设置开关与悬浮窗权限决定副屏窗口是否显示。 */
+    private void updateSecondaryScreen() {
+        if (destroyed) {
+            return;
+        }
+        if (!prefs().getBoolean(SecondaryScreenOverlay.PREF_ENABLED, false)) {
+            hideSecondaryScreen();
+            return;
+        }
+        if (!AndroidCompat.canDrawOverlays(this)) {
+            Log.w(TAG, "副屏悬浮窗已开启，但缺少「显示在其他应用上层」权限");
+            hideSecondaryScreen();
+            return;
+        }
+        showSecondaryScreen();
+    }
+
+    private void showSecondaryScreen() {
+        if (destroyed) {
+            return;
+        }
+        if (secondaryScreen == null) {
+            secondaryScreen = new SecondaryScreenOverlay(this, new SecondaryScreenOverlay.WindowListener() {
+                @Override public void onCloseRequested() {
+                    prefs().edit().putBoolean(SecondaryScreenOverlay.PREF_ENABLED, false).apply();
+                    hideSecondaryScreen();
+                    notifyClient();
+                }
+
+                @Override public void onLayoutChanged(int widthPx, int heightPx) {
+                    publishNaviScreenInfo(widthPx, heightPx);
+                }
+            });
+        }
+        if (!secondaryScreen.isShowing()) {
+            secondaryScreen.show();
+            secondaryScreen.notifyLayout();
+        }
+    }
+
+    private void hideSecondaryScreen() {
+        SecondaryScreenOverlay current = secondaryScreen;
+        if (current != null && current.isShowing()) {
+            current.hide();
+        }
+    }
+
+    /** 把副屏尺寸同步给盒子（{@code CMD_BOX_SETTINGS} 25 的 naviScreenInfo）。 */
+    private void publishNaviScreenInfo(int widthPx, int heightPx) {
+        BoxProtocolSession current = session;
+        if (current == null || widthPx <= 0 || heightPx <= 0) {
+            return;
+        }
+        SharedPreferences preferences = prefs();
+        current.sendNaviScreenInfo(widthPx, heightPx,
+                VideoPreferences.frameRate(preferences),
+                VideoPreferences.dpi(preferences, width, height));
+    }
+
+    /** 设置页切换副屏开关后调用。 */
+    void refreshSecondaryScreen() {
+        updateSecondaryScreen();
+    }
+
+    /** 设置页切换副屏大小档位后调用；手动拖动缩放过的宽度会被预设覆盖。 */
+    void applySecondaryScreenScale() {
+        updateSecondaryScreen();
+        SecondaryScreenOverlay current = secondaryScreen;
+        if (current != null && current.isShowing()) {
+            current.applyScale(prefs().getInt(SecondaryScreenOverlay.PREF_SCALE, 1));
+        }
+    }
+
     void syncCarLogo() {
         BoxProtocolSession current = session;
         if (current == null) return;
@@ -826,6 +919,8 @@ public final class ConnectionService extends Service {
         current.setMicSource(0);
         current.setAutoPlayMusic(prefs.getBoolean("auto_play_music", false));
         current.setRebootAfterUpgrade(prefs.getBoolean("reboot_after_upgrade", true));
+        // 副屏窗口与协议无关，连接建立后按开关恢复；尺寸变化会回调 naviScreenInfo。
+        updateSecondaryScreen();
         List<BoxSetting> settings = new ArrayList<>();
         settings.add(BoxSetting.dashboardInfo());
         settings.add(BoxSetting.integer("drivePosition", 0));
@@ -1080,6 +1175,8 @@ public final class ConnectionService extends Service {
         capturingDecodeType = -1;
         capture.stop();
         playback.close();
+        // 断开后副屏会停在最后一帧，先收起；重连时按开关自动恢复。
+        hideSecondaryScreen();
         if (wakeLock.isHeld()) wakeLock.release();
         phonePlugged = bluetoothLinked = wifiLinked = false;
         boxVersion = null;
@@ -1102,6 +1199,11 @@ public final class ConnectionService extends Service {
         handler.removeCallbacksAndMessages(null);
         unregisterReceiver(usbReceiver);
         closeConnection();
+        SecondaryScreenOverlay overlay = secondaryScreen;
+        secondaryScreen = null;
+        if (overlay != null) {
+            overlay.close();
+        }
         capture.close();
         mediaSession.release();
         stopForeground(true);

@@ -904,8 +904,39 @@ public final class MainActivity extends Activity {
 
 
 
-    void openOverlayPermission() {
-        Intent intent = new Intent(Build.VERSION.SDK_INT >= 23
+    /** 设置页切换「副屏悬浮窗」。 */
+    void onSecondaryScreenChanged(boolean enabled) {
+        if (enabled && !AndroidCompat.canDrawOverlays(this)) {
+            Toast.makeText(this, "副屏需要「显示在其他应用上层」权限，请先授权", Toast.LENGTH_LONG).show();
+            openOverlayPermission();
+        }
+        ConnectionService service = connectionService;
+        if (service != null) service.refreshSecondaryScreen();
+    }
+
+    /** 设置页切换副屏大小档位；手动拖动缩放过的窗口会被重置为预设宽度。 */
+    void onSecondaryScreenScaleChanged() {
+        ConnectionService service = connectionService;
+        if (service != null) service.applySecondaryScreenScale();
+    }
+
+    void showSecondaryScreenHelp() {
+        new AlertDialog.Builder(this)
+                .setTitle("副屏悬浮窗")
+                .setMessage("原版用系统真实存在的第二块屏幕（仪表屏）显示副屏画面。"
+                        + "本功能改用悬浮窗模拟副屏，把盒子下发的副屏视频流（CMD 44）"
+                        + "渲染到可拖动、可缩放的窗口里。"
+                        + "\n\n拖动窗口可移动位置；右下角「◢」拖动改变宽度，高度按画面比例自动调整；"
+                        + "右上角「×」关闭（会同时关闭本开关）。位置与大小会保存。"
+                        + "\n\n需要「显示在其他应用上层」权限。窗口只负责显示，不转发触摸——"
+                        + "副屏坐标属于另一块屏，直接按主屏坐标发送会被盒子误判。"
+                        + "\n\n如果盒子固件不上报副屏能力（supportFeatures 不含 naviScreen），"
+                        + "窗口会一直停在「等待盒子画面」。")
+                .setPositiveButton("知道了", null)
+                .show();
+    }
+
+    void openOverlayPermission() {        Intent intent = new Intent(Build.VERSION.SDK_INT >= 23
                 ? android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION
                 : android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 android.net.Uri.parse("package:" + getPackageName()));
@@ -921,7 +952,6 @@ public final class MainActivity extends Activity {
     void showSteeringLearning() {
         showSettingsPageOf(PAGE_STEERING);
     }
-
     void showNavigationLog() {
         showSettingsPageOf(PAGE_NAVIGATION);
     }

@@ -12,6 +12,7 @@ public final class ProtocolFrameSelfTest {
         testCryptHeaderRecognition();
         testCarPlayOpenPayload();
         testVideoFrameParsing();
+        testDashboardFrameParsing();
         testVideoFrameQueue();
         testAudioFrameParsing();
         testTouchFrameEncoding();
@@ -712,6 +713,63 @@ public final class ProtocolFrameSelfTest {
         check(Arrays.equals(frame.getH264Data(), new byte[]{0, 0, 0, 1}), "video payload");
 
         expectIOException(() -> VideoFrame.parse(new byte[VideoFrame.METADATA_SIZE], false));
+    }
+
+    private static void testDashboardFrameParsing() throws Exception {
+        // 副屏帧：20 字节头 + H.264，时间戳只有 4 字节毫秒（偏移 12）
+        byte[] payload = ByteBuffer.allocate(VideoFrame.METADATA_SIZE + 4)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(800)
+                .putInt(480)
+                .putInt(2)
+                .putInt(1234)
+                .putInt(0)                 // 偏移 16 的保留字节
+                .put(new byte[]{0, 0, 0, 1})
+                .array();
+        VideoFrame frame = VideoFrame.parseDashboard(payload);
+        check(frame.getWidth() == 800, "dashboard width");
+        check(frame.getHeight() == 480, "dashboard height");
+        check(frame.getFlags() == 2, "dashboard flags");
+        check(frame.getPresentationTimeUs() == 1234_000L, "dashboard ms timestamp to us");
+        check(Arrays.equals(frame.getH264Data(), new byte[]{0, 0, 0, 1}), "dashboard payload offset");
+
+        // 时间戳为 0 时按未知处理，交给解码器自己生成 pts
+        byte[] noTimestamp = ByteBuffer.allocate(VideoFrame.METADATA_SIZE + 1)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(640).putInt(360).putInt(0).putInt(0).putInt(0)
+                .put((byte) 0x65).array();
+        check(VideoFrame.parseDashboard(noTimestamp).getPresentationTimeUs() == 0L,
+                "dashboard zero timestamp stays unknown");
+
+        // 头部不完整 / 尺寸非法都要拒绝
+        expectIOException(() -> VideoFrame.parseDashboard(new byte[VideoFrame.METADATA_SIZE]));
+        byte[] badSize = ByteBuffer.allocate(VideoFrame.METADATA_SIZE + 1)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(0).putInt(480).putInt(0).putInt(0).putInt(0)
+                .put((byte) 0x65).array();
+        expectIOException(() -> VideoFrame.parseDashboard(badSize));
+        expectIOException(() -> VideoFrame.parseDashboard(null));
+
+        // naviScreenInfo：盒子侧副屏画布尺寸
+        byte[] info = BoxSetting.naviScreenInfo(800, 480, 30, 160).payload();
+        check(BoxSetting.naviScreenInfo(800, 480, 30, 160).command == 25,
+                "naviScreenInfo uses CMD_BOX_SETTINGS");
+        String json = new String(info, StandardCharsets.UTF_8);
+        check(json.contains("\"naviScreenInfo\""), "naviScreenInfo key present");
+        check(json.contains("\"width\":800"), "naviScreenInfo width");
+        check(json.contains("\"height\":480"), "naviScreenInfo height");
+        check(json.contains("\"safearea\""), "naviScreenInfo safearea");
+        check(json.contains("\"fps\":30"), "naviScreenInfo fps");
+        // 非法 fps 回落到 30，非法尺寸直接拒绝
+        check(new String(BoxSetting.naviScreenInfo(640, 360, 90, 0).payload(), StandardCharsets.UTF_8)
+                .contains("\"fps\":30"), "naviScreenInfo fps clamped");
+        boolean threw = false;
+        try {
+            BoxSetting.naviScreenInfo(0, 360, 30, 160);
+        } catch (IllegalArgumentException expected) {
+            threw = true;
+        }
+        check(threw, "naviScreenInfo rejects zero width");
     }
 
     private static void testAudioFrameParsing() throws Exception {

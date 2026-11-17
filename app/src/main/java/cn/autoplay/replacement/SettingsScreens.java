@@ -117,6 +117,12 @@ final class SettingsScreens {
                 new int[]{VideoOptions.SOFTWARE, VideoOptions.HARDWARE},
                 VideoOptions.HARDWARE, host::onDecoderChanged);
 
+        section("副屏（仪表投射）");
+        toggleRow("副屏悬浮窗", SecondaryScreenOverlay.PREF_ENABLED, false,
+                host::onSecondaryScreenChanged, host::showSecondaryScreenHelp);
+        segmentedRow("副屏大小", new String[]{"小", "中", "大"},
+                SecondaryScreenOverlay.PREF_SCALE, 1, host::onSecondaryScreenScaleChanged);
+
         section("个性化");
         carLogoRow();
         segmentedRow("主题", new String[]{"跟随系统", "浅色", "深色"}, "theme_mode", 2, host::refreshTheme);

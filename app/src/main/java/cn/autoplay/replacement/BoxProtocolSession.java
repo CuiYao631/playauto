@@ -24,6 +24,15 @@ public final class BoxProtocolSession implements AutoCloseable {
     private static final int CMD_PHASE = 3;
     private static final int CMD_PLUG_OUT = 4;
     private static final int CMD_VIDEO_FRAME = 6;
+    /**
+     * 副屏（仪表投射）视频帧。
+     *
+     * <p>与 {@link #CMD_VIDEO_FRAME} 并行的一路独立 H.264 流，头结构相同，
+     * 时间戳为 4 字节毫秒。playAuto 用它驱动悬浮窗模拟的副屏。
+     */
+    private static final int CMD_DASHBOARD_FRAME = 44;
+    /** 副屏帧头长度，与主屏一致。 */
+    private static final int DASHBOARD_HEADER_SIZE = 20;
     private static final int CMD_CARPLAY = 8;
     private static final int CMD_AUTO_CONNECT = 8;
     private static final int CMD_SET_CAR_LOGO_TYPE = 9;
@@ -123,7 +132,9 @@ public final class BoxProtocolSession implements AutoCloseable {
     }
 
     public interface Listener {
-        default void onBoxName(boolean bluetooth, String name) { }        default void onError(String message, Throwable error) { }
+        default void onBoxName(boolean bluetooth, String name) { }
+
+        default void onError(String message, Throwable error) { }
         default void onNavigationData(String data) { }
         default void onNavigationUpdate(org.json.JSONObject data) { }
         default void onNavigationEnded() { }
@@ -132,7 +143,17 @@ public final class BoxProtocolSession implements AutoCloseable {
 
         void onPhoneStatus(String status);
         void onVideoFrame(VideoFrame frame);
+
+        /**
+         * 副屏（仪表投射）视频帧，对应 {@code CMD_DASHBOARD_FRAME}(44)。
+         *
+         * <p>与主屏 {@link #onVideoFrame} 是两路独立的 H.264 流，尺寸和帧率都可能不同。
+         */
+        default void onDashboardFrame(VideoFrame frame) {
+        }
+
         void onAudioFrame(AudioFrame frame);
+
         void onAudioStreamStopped(int decodeType, int audioType);
         void onMicrophoneStart(int decodeType);
         void onMicrophoneStop();
@@ -636,6 +657,8 @@ public final class BoxProtocolSession implements AutoCloseable {
                     if (listener != null) {
                         listener.onVideoFrame(frame);
                     }
+                } else if (packet.command == CMD_DASHBOARD_FRAME && protocolReady) {
+                    handleDashboardFrame(packet.payload);
                 } else if (packet.command == 7 && protocolReady) {
                     handleAudioPacket(packet.payload);
                 }
@@ -1102,6 +1125,41 @@ public final class BoxProtocolSession implements AutoCloseable {
                 break;
         }
         publishLinkState();
+    }
+
+    /**
+     * 处理副屏帧 {@code CMD_DASHBOARD_FRAME}(44)。
+     *
+     * <p>解析失败只记日志：副屏是可选功能，单帧损坏不应打断主屏投屏。
+     */
+    private void handleDashboardFrame(byte[] payload) {
+        if (payload == null || payload.length <= DASHBOARD_HEADER_SIZE) {
+            Log.w("BoxProtocolSession", "CMD_DASHBOARD_FRAME 载荷过短：" + (payload == null ? 0 : payload.length));
+            return;
+        }
+        try {
+            VideoFrame frame = VideoFrame.parseDashboard(payload);
+            if (listener != null) {
+                listener.onDashboardFrame(frame);
+            }
+        } catch (IOException exception) {
+            Log.w("BoxProtocolSession", "CMD_DASHBOARD_FRAME 解析失败", exception);
+        }
+    }
+
+    /**
+     * 告知盒子副屏画面尺寸（{@code CMD_BOX_SETTINGS} 25 的 {@code naviScreenInfo}）。
+     *
+     * <p>原版用 Android {@code Presentation} 绑定真实副屏的 {@code getRealMetrics()}；
+     * playAuto 用悬浮窗模拟，因此改为上报悬浮窗的像素尺寸与 DPI。
+     */
+    public void sendNaviScreenInfo(int widthPx, int heightPx, int fps, int dpi) {
+        if (!protocolReady || closed || widthPx <= 0 || heightPx <= 0) {
+            return;
+        }
+        byte[] payload = BoxSetting.naviScreenInfo(widthPx, heightPx, fps, dpi).payload();
+        runOnControlExecutor(() -> writeFrame(
+                ProtocolFrame.encode(25, payload, cryptEnabled, nonce)));
     }
 
     private void handleDashboardData(byte[] payload) {

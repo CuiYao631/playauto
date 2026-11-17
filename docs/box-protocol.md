@@ -69,7 +69,7 @@ USB 层不做任何加解密，字节流原样收发。
 | 17 | `CMD_AUTO_CONN_BT_ADDR` | 17 B | 指定自动回连目标 MAC；与 `8/1002` 互补，1002 由盒子自选 |
 | 18 | `CMD_BLUETOOTH_PAIRED_LIST` | N | 已配对列表，换行分隔 |
 | 20 | `CMD_CAR_MANUFACTURER_INFO` | 8 B | 2 × int32 |
-| 22 | `CMD_CAMERA_INFO` | 4 + N | 首 int 固定 `1`，后接数据 |
+| 22 | `CMD_CAMERA_INFO` | 4 + N | 首 int 固定 `1`，后接数据（**车机无摄像头，不实现**） |
 | 23 | `CMD_MULTI_TOUCH` | N | 多点触摸原始包 |
 | 25 | `CMD_BOX_SETTINGS` | JSON | DockPosition / ViewAreaInfo / naviScreenInfo 等 |
 | 119 | `CMD_APP_RESET` | 4 B int | 通知盒子 App 已重置 |
@@ -106,7 +106,7 @@ USB 层不做任何加解密，字节流原样收发。
 | 24 / 25 | WiFi 类型 24 / 25 |
 | 201 | 媒体播放中 |
 | 1002 | 请求自动连接 |
-| 1013 | 请求蓝牙在线列表 |
+| 1013 | 请求蓝牙在线列表（HiCar/Carlink 配对流程用，不实现） |
 
 ### `CMD_FILE` (153) 负载
 
@@ -149,12 +149,12 @@ USB 层不做任何加解密，字节流原样收发。
 | 14 | `CMD_BOX_WIFI_NAME` | ≤16 B | 盒子 WiFi 名 |
 | 18 | `CMD_BLUETOOTH_PAIR_LIST` | N | 已配对列表 |
 | 19 | `CMD_BLUETOOTH_ONLINE_LIST` | N | 在线设备列表 |
-| 22 | `CMD_CAMERA_INFO` | 4 + N | `2`=取图像块，`3`=开摄像头，`4`=关摄像头 |
-| 24 | `CMD_HICAR_URL` | N | HiCar 连接 URL |
+| 22 | `CMD_CAMERA_INFO` | 4 + N | `2`=取图像块，`3`=开摄像头，`4`=关（**车机无摄像头，不实现**） |
+| 24 | `CMD_HICAR_URL` | N | HiCar 连接 URL（**常安车机无 HiCar，不实现**） |
 | 25 | `CMD_BOX_INFO` | N | 盒子信息串（uuid / mfd / model 等） |
 | 42 | `CMD_DASHBOARD_DATA` | N | 仪表数据，`1`=文本 `2/3`=封面图 `100/200`=JSON `202/203`=原始 |
-| 43 | `CMD_CONNECTION_PIN_CODE` | 4 + N | 手机类型 + 连接 PIN 码 |
-| 44 | `CMD_DASHBOARD_FRAME` | 4 + 20 + N | 副屏视频帧 |
+| 43 | `CMD_CONNECTION_PIN_CODE` | 4 + N | 手机类型 + 连接 PIN 码（**仅 HiCar/Carlink 使用，不实现**） |
+| 44 | `CMD_DASHBOARD_FRAME` | 20 + N | 副屏视频帧 |
 | 119 | `CMD_APP_RESET` | 4 B | 要求 App 重置 |
 | 136 | `CMD_DEBUG_TEST` | 4 B | 调试 |
 | 153 | `CMD_FILE` | 见 §8 | 从盒子拉取文件（log / apk） |
@@ -277,21 +277,25 @@ USB 层不做任何加解密，字节流原样收发。
 
 ## 11. 盒子侧 `CMD_CARPLAY_CMD` (8) 上报值
 
-| 值 | 含义 |
-|---|---|
-| 1 / 2 | 开始 / 停止录音 |
-| 3 | `CarPlay_RequestHostUI` |
-| 7 | 使用手机麦克风 |
-| 8 | — |
-| 9 / 10 | — |
-| 15 | 使用盒子麦克风 |
-| 500 / 501 | 断连 / 重连提示 |
-| 506 / 507 | — |
-| 1000 | 盒子支持 WiFi |
-| 1001 | 盒子支持自动连接 |
-| 1003 ~ 1008 | 蓝牙 / WiFi 状态回报 |
-| 1009 / 1010 | WiFi 连接 / 断开 |
-| 1011 / 1012 | 支持 WiFi / 需 KO |
+| 值 | 含义 | CarPlay |
+|---|---|---|
+| 1 / 2 | 开始 / 停止录音 | ✅ 已实现 |
+| 3 | `CarPlay_RequestHostUI` | ✅ 已实现 |
+| 7 | 使用手机麦克风 | ⛔ 不用（麦克风固定车载） |
+| 8 | — | ⛔ |
+| 9 / 10 | — | ⛔ |
+| 15 | 使用盒子麦克风 | ⛔ 不用（麦克风固定车载） |
+| 500 / 501 | 断连 / 重连提示 | ⬜ 未实现 |
+| 506 / 507 | 导航开始 / 结束 | ✅ 已实现 |
+| 1000 | 盒子支持 WiFi | ⬜ 未实现 |
+| 1001 | 盒子支持自动连接 | ✅ 已实现 |
+| 1003 ~ 1006 | 蓝牙 / WiFi 状态回报 | ⬜ 未实现 |
+| 1007 / 1008 | 蓝牙连接 / 断开 | ✅ 已实现 |
+| 1009 / 1010 | WiFi 连接 / 断开 | ✅ 已实现 |
+| 1011 / 1012 | 支持 WiFi / 需 KO | ⬜ 未实现 |
+
+> `7 / 8 / 15` 是盒子侧的麦克风来源协商。playAuto 固定使用车载麦克风，
+> 因此不响应这些上报；下行固定发 `8 / 7`。
 
 ---
 
@@ -341,7 +345,7 @@ USB 层不做任何加解密，字节流原样收发。
 | 16 | `EVT_CARLIFE_DOWNLOAD` |
 | 24 | `EVT_BOX_ENTER_U_MODE` |
 | 25 | `EVT_MANUAL_DISCONNECT_PHONE` |
-| 29 / 30 / 31 | 摄像头画面 / 开摄像头 / 关摄像头 |
+| 29 / 30 / 31 | 摄像头画面 / 开摄像头 / 关摄像头（车机无摄像头，不实现） |
 | 32 | `EVT_APP_LOG_GET` |
 | 33 | `EVT_APP_UPDATE` |
 | 34 | `EVT_APP_RESET` |
@@ -430,7 +434,10 @@ sequenceDiagram
 | 240 `ENABLE_CRYPT` | ✅ 含 native `stCheck` |
 | **206 `BOX_REBOOT`** | ✅ **本次新增**：升级成功（187=2/6）后自动下发，另可在设置页手动触发 |
 | **17 `AUTO_CONN_BT_ADDR`** | ✅ 设置 → 更多设置 → 盒子配置 →「指定回连手机」；列表来自 cmd 18 |
-| 10 `BLUETOOTH_ADDR` | ⛔ **不实现**：来源是私有广播 `AUTO_BOX_CONTROL_CMD_EVT`，长按车机不发送 |
+| 10 `BLUETOOTH_ADDR` | ⛔ **不实现**：来源是私有广播 `AUTO_BOX_CONTROL_CMD_EVT`，常安车机不发送 |
+| 19 / 24 / 43 / 8-1013 | ⛔ **不实现**：HiCar/Carlink 相关，常安车机已确认无此功能 |
+| 22 `CAMERA_INFO` | ⛔ **不实现**：车机无摄像头，且不属于 CarPlay 功能 |
+| 8 上报的 `7/8/15` | ⛔ **不实现**：麦克风固定车载，不参与来源协商 |
 
 ### 未实现清单
 
@@ -439,10 +446,6 @@ sequenceDiagram
 | cmd | 名称 | 备注 |
 |---|---|---|
 | 11 | `CMD_CARPLAY_MODE_CHANGE` | 28 B，7 个 int（显示模式/边距等） |
-| 19 | `CMD_BLUETOOTH_ONLINE_LIST` | 在线设备列表，原版广播 211 |
-| 22 | `CMD_CAMERA_INFO` | `2`=取图像块 / `3`=开 / `4`=关摄像头 |
-| 24 | `CMD_HICAR_URL` | phoneType==6 时展示连接 URL |
-| 43 | `CMD_CONNECTION_PIN_CODE` | phoneType 6/7 弹配对码 |
 | 44 | `CMD_DASHBOARD_FRAME` | 副屏 H.264 帧 |
 | 119 | `CMD_APP_RESET` | 要求 App 重置 |
 | 136 | `CMD_DEBUG_TEST` | 仅打日志 |
@@ -454,18 +457,27 @@ sequenceDiagram
 
 | cmd | 名称 | 备注 |
 |---|---|---|
-| 5 | `CMD_TOUCH`（旧式单指） | playAuto 一律走 23 `MULTI_TOUCH` |
-| 18 | `CMD_BLUETOOTH_PAIR_LIST`（写回） | 原版长按删除某条后回写新列表 |
-| 22 | `CMD_CAMERA_INFO` | 摄像头控制 |
-| 160 | `CMD_APP_INFO` | version/uuid/model/platform/huid 等大段 JSON |
-| 8/1013 | `CMD_AUTO_CONNECT` `requestBluetoothOnlineList` | 请求在线蓝牙列表（配合 19） |
-| 10 | `CMD_BLUETOOTH_ADDR` | 车机侧 MAC；常安车机无对应广播，明确不做 |
+| 5 | `CMD_TOUCH`（旧式单指） | 原版由 `BoxInterface._o0o_OoO_0O_Oo_()` 供另一条触控路径使用；playAuto 一律走 23 `MULTI_TOUCH` |
+| 15 | `CMD_MANUAL_DISCONNECT` | 主机主动断开手机；playAuto 未提供入口 |
+| 18 | `BLUETOOTH_PAIR_LIST`（写回） | 原版长按删除某条后回写新列表 |
+| 160 | `APP_INFO` | version/code/uuid/size/model/platform/android/huid/language/brand/year/so 大段 JSON |
+
+明确不做（车机不支持）：
+
+| cmd | 名称 | 原因 |
+|---|---|---|
+| 10 | `BLUETOOTH_ADDR` | 常安车机不发送 `AUTO_BOX_CONTROL_CMD_EVT` 广播 |
+| 19 / 8-1013 | 蓝牙在线列表（收发两侧） | HiCar/Carlink 配对流程专用 |
+| 24 | `HICAR_URL` | **已确认无 HiCar**（原版仅 phoneType==6 使用） |
+| 43 | `CONNECTION_PIN_CODE` | **已确认无 HiCar**（原版仅 phoneType 6/7 = HiCar/Carlink） |
+| 22 | `CAMERA_INFO`（收发两侧） | **车机无摄像头**，不属于 CarPlay 功能 |
+| 8 上报 `7/8/15` | 麦克风来源协商 | **麦克风固定车载**，不属于 CarPlay 功能 |
 
 半实现项：
 
 - `42 CMD_DASHBOARD_DATA` 只处理 subtype `200`（导航 JSON）；缺 `1` 文本、`2/3` 封面图、`100` JSON、`202/203` 原始
-- `8 CMD_CARPLAY` 上报缺 `7/8/9/10/15`（麦克风来源协商）、`500/501`（断连/重连提示）、`1000`（支持 WiFi）、`1003~1006`、`1011/1012`（需 KO）
-- `6 CMD_VIDEO_FRAME` 的 `flags` 解析出来但未使用：缺 `bit0` 熄屏编码（原版广播 10/11）、`bit2-3` 解码方式运行时切换
+- `8 CMD_CARPLAY` 上报缺 `500/501`（断连/重连提示）、`1000`（支持 WiFi）、`1003~1006`、`1011/1012`（需 KO）；`7/8/15` 麦克风协商按上表不做
+- `6 CMD_VIDEO_FRAME` 的 `flags` 解析出来但未使用：`bit2-3` 压缩方式因固定 H.264 无需切换；`bit0` 熄屏编码未处理（原版广播 10/11）
 - `25 CMD_BOX_SETTINGS` 只发 4 个单键 JSON；缺 `naviScreenInfo`（HUD 安全区）、`ViewAreaInfo`（多窗口）、`cornerMasks`、`MapThemeMode`、`GNSSCapability`、`fps/dpi/尺寸`
 - `4 CMD_PLUGOUT` 未区分值 `1`（手机端主动断开）
 - `1 CMD_OPEN` 收到空负载时不会按原版重发 `g_Open`

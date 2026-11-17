@@ -37,6 +37,11 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="connectedDevice|microphone" />
+        <!-- 独立进程：libnx1 首次调用可能直接杀进程，隔离到这里探测 -->
+        <service
+            android:name=".CryptoProbeService"
+            android:exported="false"
+            android:process=":cryptoprobe" />
         <receiver
             android:name=".BootStartReceiver"
             android:exported="false">

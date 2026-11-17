@@ -153,6 +153,8 @@ public final class ConnectionService extends Service {
         wakeLock.setReferenceCounted(false);
         mediaSession = MediaControls.create(this);
         refreshSettings();
+        // 提前在 :crypto-probe 进程探测 libnx1 是否可用，避免主进程调用时被 native 直接杀进程
+        CryptoSupport.install(this);
         IntentFilter filter = new IntentFilter(USB_PERMISSION);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);

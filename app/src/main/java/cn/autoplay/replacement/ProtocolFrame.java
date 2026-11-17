@@ -25,9 +25,7 @@ public final class ProtocolFrame {
         if (!crypt) {
             return encodeLegacy(command, payload);
         }
-        if (!BoxCore.isAvailable()) {
-            throw new IOException("libnx1 is not available for crypt frames");
-        }
+        requireNativeCrypt();
         byte[] encryptedPayload = payload.clone();
         BoxCore.stCheck(true, encryptedPayload, nonce, encryptedPayload);
         return encodeWithMagic(command, encryptedPayload, CRYPT_MAGIC);
@@ -37,13 +35,26 @@ public final class ProtocolFrame {
         if (!header.isCryptFrame()) {
             return payload.clone();
         }
-        if (!BoxCore.isAvailable()) {
-            throw new IOException("libnx1 is not available for crypt frames");
-        }
+        requireNativeCrypt();
         byte[] encryptedInput = payload.clone();
         byte[] decodedOutput = payload.clone();
         BoxCore.stCheck(false, encryptedInput, nonce, decodedOutput);
         return decodedOutput;
+    }
+
+    /**
+     * 加密帧必须走 {@code libnx1}，而该库在重签名构建里会直接崩溃（见 {@link CryptoSupport}）。
+     *
+     * <p>这里做最后一道防线：探测结论为不可用时直接抛出带说明的异常，
+     * 交给会话层按「不支持加密」处理，绝不在主进程里调用 native。
+     */
+    private static void requireNativeCrypt() throws IOException {
+        if (!BoxCore.isAvailable()) {
+            throw new IOException("libnx1 未加载，无法处理加密帧");
+        }
+        if (!CryptoSupport.isUsable()) {
+            throw new IOException("原生加密库不可用（应用签名与原版不一致），已跳过加密");
+        }
     }
 
     private static byte[] encodeWithMagic(int command, byte[] payload, int magic) {

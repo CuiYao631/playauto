@@ -425,6 +425,7 @@ public final class BoxProtocolSession implements AutoCloseable {
         try {
             nonce = nextNonce();
             boolean boxVersionFallbackSent = false;
+            boolean cryptFallbackSent = false;
             int boxVersionCode = BoxOpenRequest.DEFAULT_BOX_VERSION_CODE;
             String boxSoftwareVersion = null;
             sendEnableCrypt();
@@ -460,11 +461,22 @@ public final class BoxProtocolSession implements AutoCloseable {
                 }
 
                 if (packet.command == CMD_ENABLE_CRYPT) {
-                    cryptEnabled = true;
                     if (!BoxCore.isAvailable()) {
                         publish("车机盒要求加密，但 libnx1 JNI bridge 未加载");
                         return;
                     }
+                    if (!CryptoSupport.awaitUsable(3000)) {
+                        // 该库在重签名构建里首次调用会写空指针直接杀进程
+                        // （tombstone: SIGSEGV @ libnx1 stCheck+548 → 0xa84），
+                        // 因此只能在独立进程里探测，这里绝不调用 native。
+                        if (!cryptFallbackSent) {
+                            cryptFallbackSent = true;
+                            publish("车机盒要求加密，但原生加密库在当前应用签名下不可用，改为未加密连接");
+                            sendOpen(false, boxVersionCode);
+                        }
+                        continue;
+                    }
+                    cryptEnabled = true;
                     openResponseReceived = false;
                     retries = 0;
                     sendOpen(true, boxVersionCode);

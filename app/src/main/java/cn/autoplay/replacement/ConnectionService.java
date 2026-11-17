@@ -687,6 +687,20 @@ public final class ConnectionService extends Service {
         return current.removePairedDevice(mac);
     }
 
+    /**
+     * 要求盒子断开当前连接的手机（{@code CMD_MANUAL_DISCONNECT} 15）。
+     *
+     * <p>与「指定回连手机」互逆：17 是把某台手机连上，15 是把当前手机踢掉。
+     */
+    boolean manualDisconnectPhone() {
+        BoxProtocolSession current = session;
+        if (current == null) {
+            setBoxStatus("盒子：未连接，无法断开手机");
+            return false;
+        }
+        return current.requestManualDisconnect();
+    }
+
     void syncCarLogo() {
         BoxProtocolSession current = session;
         if (current == null) return;

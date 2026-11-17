@@ -27,6 +27,18 @@ public final class BoxProtocolSession implements AutoCloseable {
     private static final int CMD_AUTO_CONNECT = 8;
     private static final int CMD_SET_CAR_LOGO_TYPE = 9;
     private static final int CMD_SET_CAR_BRAND = 20;
+    /**
+     * 要求盒子断开当前连接的手机（零负载）。
+     *
+     * <p>原版 {@code sendManualDisconnectTemp()} 只在两个场景下发：盒子设置页打开时
+     * 收到「手机插入」（把手机踢掉，避免设置在投屏中途被改），以及两块车机型号在
+     * 屏幕配置变化后强制手机重连。playAuto 改为设置页里的手动入口。
+     *
+     * <p>与 {@link #CMD_BOX_REBOOT} 一样是零负载命令：原版 {@code oO0O00o._oOoOOO()}
+     * 在 {@code len == 0} 时直接返回，既不加密也不切 magic，所以帧头必须保持明文
+     * {@code 0x55AA55AA}，见 {@link #createManualDisconnectFrame()}。
+     */
+    private static final int CMD_MANUAL_DISCONNECT = 15;
     private static final int CMD_UPLOAD_FILE = 153;
     private static final int CARPLAY_REQUEST_KEY_FRAME = 12;
     // Same per-transfer limit as the original app; larger bulk writes fail on many hosts.
@@ -71,6 +83,13 @@ public final class BoxProtocolSession implements AutoCloseable {
      * 否则重启指令可能抢在成功回报之前把 USB 掐断。
      */
     private static final long UPGRADE_REBOOT_DELAY_MS = 1500L;
+    /**
+     * 手动断开后抑制自动回连的时长。
+     *
+     * <p>盒子被踢掉手机后会进入等待阶段并触发 {@link #maybeAutoConnect()}，
+     * 若不抑制就会在 2 秒后自己又连回来，手动断开等于白做。
+     */
+    static final long MANUAL_DISCONNECT_COOLDOWN_MS = 60_000L;
 
     /**
      * 盒子 {@code CMD_BLUETOOTH_PAIR_LIST}(18) 里的一条已配对手机。
@@ -181,6 +200,8 @@ public final class BoxProtocolSession implements AutoCloseable {
     private volatile boolean rebootAfterUpgrade = true;
     /** 本会话是否已经安排过重启，避免重复下发。 */
     private boolean rebootRequested;
+    /** 手动断开后的自动回连抑制截止时刻（{@link SystemClock#elapsedRealtime()}）。 */
+    private volatile long autoConnectSuppressedUntil;
     private volatile String boxUuid = "";
     private volatile String boxManufacturer = "";
     private volatile String boxProductType = "";
@@ -814,6 +835,43 @@ public final class BoxProtocolSession implements AutoCloseable {
         }
     }
 
+    /**
+     * 构造手动断开命令帧（{@code CMD_MANUAL_DISCONNECT} 15）。
+     *
+     * <p>零负载命令，必须保持原版的明文形态：既不加密也不切 {@code 0x55BB55BB}。
+     */
+    static byte[] createManualDisconnectFrame() {
+        return ProtocolFrame.encodeLegacy(CMD_MANUAL_DISCONNECT, new byte[0]);
+    }
+
+    /**
+     * 要求盒子断开当前连接的手机（{@code CMD_MANUAL_DISCONNECT} 15）。
+     *
+     * <p>下发后会压制自动回连 {@link #MANUAL_DISCONNECT_COOLDOWN_MS} 毫秒：盒子断开手机
+     * 后会进入等待阶段并回调 {@link #maybeAutoConnect()}，不压制就会立刻又连回来。
+     * 用户点名回连（cmd 17）或盒子重新上报手机工作时会提前解除压制。
+     *
+     * @return 指令是否写入 USB（不代表手机已经断开）
+     */
+    public boolean requestManualDisconnect() {
+        if (closed) {
+            publish("断开手机失败：连接已关闭");
+            return false;
+        }
+        // 先占住抑制窗口：即使这一帧写失败，也要避免随后触发的自动回连
+        autoConnectSuppressedUntil = SystemClock.elapsedRealtime() + MANUAL_DISCONNECT_COOLDOWN_MS;
+        autoConnectRequested = false;
+        try {
+            writeFrame(createManualDisconnectFrame());
+            publish("已要求盒子断开当前手机（CMD 15），"
+                    + (MANUAL_DISCONNECT_COOLDOWN_MS / 1000) + " 秒内不再自动回连");
+            return true;
+        } catch (IOException exception) {
+            publish("断开手机指令未送达：" + exception.getMessage());
+            return false;
+        }
+    }
+
     /** 升级成功后延时下发重启，避免抢在成功回报之前掐断 USB。 */
     private void scheduleRebootAfterUpgrade() {
         if (!rebootAfterUpgrade || rebootRequested || closed) {
@@ -966,6 +1024,8 @@ public final class BoxProtocolSession implements AutoCloseable {
         switch (phase) {
             case 3:
                 phoneWorking = true;
+                // 手机已经连上，手动断开的抑制窗口不再需要
+                autoConnectSuppressedUntil = 0;
                 publishPhoneStatus(phoneTypeName(phoneType) + " 工作中");
                 break;
             case 4:
@@ -981,6 +1041,7 @@ public final class BoxProtocolSession implements AutoCloseable {
             case 6:
             case 8:
                 phoneWorking = true;
+                autoConnectSuppressedUntil = 0;
                 publishPhoneStatus(phoneTypeName(phoneType) + " 已连接并工作");
                 break;
             case 11:
@@ -1194,6 +1255,8 @@ public final class BoxProtocolSession implements AutoCloseable {
             writeFrame(ProtocolFrame.encode(CMD_AUTO_CONN_BT_ADDR, payload, cryptEnabled, nonce));
             publish("已请求盒子回连指定手机：" + mac.toUpperCase(java.util.Locale.ROOT));
             autoConnectRequested = true;
+            // 用户主动点名回连，解除手动断开留下的抑制窗口
+            autoConnectSuppressedUntil = 0;
             return true;
         } catch (IOException exception) {
             publish("指定回连失败：" + exception.getMessage());
@@ -1298,10 +1361,15 @@ public final class BoxProtocolSession implements AutoCloseable {
         return sent;
     }
 
+    /** 当前是否处在「手动断开后的自动回连抑制窗口」内。 */
+    private boolean autoConnectSuppressed() {
+        return autoConnectSuppressedUntil > SystemClock.elapsedRealtime();
+    }
+
     private void maybeAutoConnect() {
         if (!protocolReady || !boxSupportsAutoConnect || !autoConnectEnabled
                 || pairedDeviceCount <= 0 || phoneWorking || bluetoothConnected
-                || autoConnectRequested || closed) {
+                || autoConnectRequested || autoConnectSuppressed() || closed) {
             return;
         }
         autoConnectRequested = true;
@@ -1313,7 +1381,8 @@ public final class BoxProtocolSession implements AutoCloseable {
                 autoConnectRequested = false;
                 return;
             }
-            if (!closed && autoConnectEnabled && !phoneWorking && !bluetoothConnected) {
+            if (!closed && autoConnectEnabled && !phoneWorking && !bluetoothConnected
+                    && !autoConnectSuppressed()) {
                 try {
                     byte[] payload = ByteBuffer.allocate(4)
                             .order(ByteOrder.LITTLE_ENDIAN)

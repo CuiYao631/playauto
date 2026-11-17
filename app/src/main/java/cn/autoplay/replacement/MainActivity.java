@@ -1694,7 +1694,8 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
-    void onRebootBoxTapped() {        ConnectionService service = connectionService;
+    void onRebootBoxTapped() {
+        ConnectionService service = connectionService;
         if (service == null) {
             Toast.makeText(this, "请先连接盒子", Toast.LENGTH_SHORT).show();
             return;
@@ -1707,6 +1708,36 @@ public final class MainActivity extends Activity {
                     Toast.makeText(this, sent
                             ? "已发送重启指令，等待盒子重新连接"
                             : "重启指令未送达，请检查盒子连接",
+                            Toast.LENGTH_LONG).show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /**
+     * 主动断开当前连接的手机（{@code CMD_MANUAL_DISCONNECT} 15）。
+     *
+     * <p>零负载命令，由盒子执行断开。断开后协议层会压制自动回连一段时间，
+     * 避免「刚断开又被自动连接拉回来」；需要恢复时用「指定回连手机」点名即可提前解除。
+     */
+    void onManualDisconnectTapped() {
+        ConnectionService service = connectionService;
+        if (service == null) {
+            Toast.makeText(this, "请先连接盒子", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("断开当前连接的手机")
+                .setMessage("会让盒子立刻断开当前手机，投屏会中断。"
+                        + "\n\n断开后 "
+                        + (BoxProtocolSession.MANUAL_DISCONNECT_COOLDOWN_MS / 1000)
+                        + " 秒内不会自动回连，避免刚断开又被连上。"
+                        + "需要恢复时可在手机上重新连接，或用下方「指定回连手机」点名。")
+                .setPositiveButton("断开", (dialog, which) -> {
+                    boolean sent = service.manualDisconnectPhone();
+                    Toast.makeText(this, sent
+                            ? "已要求盒子断开手机，等待手机退出"
+                            : "断开指令未送达，请检查盒子连接",
                             Toast.LENGTH_LONG).show();
                 })
                 .setNegativeButton("取消", null)

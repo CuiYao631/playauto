@@ -24,6 +24,7 @@ public final class ProtocolFrameSelfTest {
         testHeadlightNightMode();
         testBoxFirmwarePayload();
         testAutoConnectByBluetoothAddress();
+        testManualDisconnectFrame();
         testSteeringKeyCodeParsing();
         testFrameRateNormalization();
         testNightModeSelection();
@@ -396,6 +397,31 @@ public final class ProtocolFrameSelfTest {
                 "newlines in device name are flattened");
         check(BoxProtocolSession.parseBluetoothPairList(sanitized).size() == 1,
                 "flattened name keeps a single record");
+    }
+
+    private static void testManualDisconnectFrame() {
+        // cmd 15 是零负载命令：原版 len == 0 时直接跳过加密与 magic 切换
+        byte[] frame = BoxProtocolSession.createManualDisconnectFrame();
+        check(frame.length == 16, "manual disconnect frame carries only the 16-byte header");
+        ByteBuffer header = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN);
+        check(header.getInt(0) == 0x55AA55AA, "manual disconnect frame uses legacy magic");
+        check(header.getInt(4) == 0, "manual disconnect payload length is zero");
+        check(header.getInt(8) == 15, "manual disconnect command is CMD_MANUAL_DISCONNECT");
+        check(header.getInt(12) == ~15, "manual disconnect check is ~cmd");
+
+        // 帧应能被解析回同一条命令，且负载长度为 0
+        try {
+            ProtocolFrame.Header decoded = ProtocolFrame.decodeHeader(frame, 0, 16 * 1024 * 1024);
+            check(decoded.getCommand() == 15, "manual disconnect frame decodes to cmd 15");
+            check(decoded.getPayloadLength() == 0, "manual disconnect frame decodes to empty payload");
+            check(!decoded.isCryptFrame(), "manual disconnect frame stays plaintext");
+        } catch (IOException exception) {
+            throw new AssertionError("manual disconnect frame is not decodable", exception);
+        }
+
+        // 抑制窗口必须在手动断开后覆盖一次自动回连延迟，否则断开后立刻被连回来
+        check(BoxProtocolSession.MANUAL_DISCONNECT_COOLDOWN_MS > 2000L,
+                "manual disconnect cooldown outlasts the auto-connect delay");
     }
 
     private static void testBoxFirmwarePayload() throws Exception {

@@ -180,6 +180,7 @@ final class SettingsScreens {
         toggleRow("升级成功后重启盒子", "reboot_after_upgrade", true,
                 value -> host.onBoxSettingsChanged(), host::showRebootAfterUpgradeHelp);
         navigationRow("立即重启盒子", host::onRebootBoxTapped);
+        navigationRow("断开当前连接的手机", host::onManualDisconnectTapped);
         navigationRow("指定回连手机", host::showAutoConnectDevicePicker);
         navigationRow("删除已配对手机", host::showPairedDeviceRemoval);
 

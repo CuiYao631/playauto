@@ -65,7 +65,7 @@ USB 层不做任何加解密，字节流原样收发。
 | 10 | `CMD_BLUETOOTH_ADDR` | 17 B | **车机侧**蓝牙 MAC（ASCII）；原版靠私有广播 `AUTO_BOX_CONTROL_CMD_EVT`(data=100) 透传，长按车机无此广播，故 playAuto 不实现 |
 | 13 | `CMD_BOX_BLUETOOTH_NAME` | ≤15 B | 盒子蓝牙名 |
 | 14 | `CMD_BOX_WIFI_NAME` | ≤15 B | 盒子 WiFi 名 |
-| 15 | `CMD_MANUAL_DISCONNECT` | 0 | 主机主动断开手机 |
+| 15 | `CMD_MANUAL_DISCONNECT` | 0 | 主机主动断开手机；零负载 → 明文 magic，见 §3.1 |
 | 17 | `CMD_AUTO_CONN_BT_ADDR` | 17 B | 指定自动回连目标 MAC；与 `8/1002` 互补，1002 由盒子自选 |
 | 18 | `CMD_BLUETOOTH_PAIRED_LIST` | N | 已配对列表，换行分隔 |
 | 20 | `CMD_CAR_MANUFACTURER_INFO` | 8 B | 2 × int32 |
@@ -89,6 +89,18 @@ USB 层不做任何加解密，字节流原样收发。
 | 4 | X |
 | 8 | Y |
 | 12 | `androidWorkMode \| (boffscreen << 16)` |
+
+### `CMD_MANUAL_DISCONNECT` (15)
+
+零负载命令，让盒子断开当前连接的手机。原版 `sendManualDisconnectTemp()` 只在两个
+场景下发：盒子设置页打开时收到「手机插入」（把手机踢掉，避免设置在投屏中途被改），
+以及两块车机型号在屏幕配置变化后强制手机重连。playAuto 改为设置页里的手动入口。
+
+与 `206`/`170` 同样是**零负载 → 明文 magic `0x55AA55AA`**，不受加密状态影响。
+
+> playAuto 下发后会压制自动回连 `60 s`：盒子断开手机后会进入等待阶段并回调
+> `maybeAutoConnect()`，不压制就会在 2 秒后自己又连回来。用户点名回连（`17`）或
+> 盒子重新上报手机工作时会提前解除压制。
 
 ### `CMD_CARPLAY_CMD` (8) 子命令
 
@@ -435,6 +447,7 @@ sequenceDiagram
 | **206 `BOX_REBOOT`** | ✅ **本次新增**：升级成功（187=2/6）后自动下发，另可在设置页手动触发 |
 | **17 `AUTO_CONN_BT_ADDR`** | ✅ 设置 → 更多设置 → 盒子配置 →「指定回连手机」；列表来自 cmd 18 |
 | **18 写回** | ✅ 设置 → 更多设置 → 盒子配置 →「删除已配对手机」；回写格式同下发（`MAC+名称\n` + `\0`） |
+| **15 `MANUAL_DISCONNECT`** | ✅ 设置 → 更多设置 → 盒子配置 →「断开当前连接的手机」；零负载明文帧，下发后压制自动回连 60 s |
 | 10 `BLUETOOTH_ADDR` | ⛔ **不实现**：来源是私有广播 `AUTO_BOX_CONTROL_CMD_EVT`，常安车机不发送 |
 | 19 / 24 / 43 / 8-1013 | ⛔ **不实现**：HiCar/Carlink 相关，常安车机已确认无此功能 |
 | 22 `CAMERA_INFO` | ⛔ **不实现**：车机无摄像头，且不属于 CarPlay 功能 |
@@ -459,7 +472,6 @@ sequenceDiagram
 | cmd | 名称 | 备注 |
 |---|---|---|
 | 5 | `CMD_TOUCH`（旧式单指） | 原版由 `BoxInterface._o0o_OoO_0O_Oo_()` 供另一条触控路径使用；playAuto 一律走 23 `MULTI_TOUCH` |
-| 15 | `CMD_MANUAL_DISCONNECT` | 主机主动断开手机；playAuto 未提供入口 |
 | 160 | `APP_INFO` | version/code/uuid/size/model/platform/android/huid/language/brand/year/so 大段 JSON |
 
 明确不做（车机不支持）：

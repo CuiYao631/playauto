@@ -1,6 +1,6 @@
 {
-  "version": "2026.11.17.1421",
-  "versionCode": 26111714,
+  "version": "2026.11.22.2035",
+  "versionCode": 26112220,
   "url": "https://github.com/CuiYao631/playauto/releases/latest/download/AutoPlayReplacement-debug.apk",
-  "notes": "1.添加功能手动断开连接\n"
+  "notes": "fix: 视频解码失败不再误判为连接失败，并补充 USB 诊断\n\n1. H.264 解码失败时首页提示改用软解，并记录到连接详情\n2. 心跳连续失败 3 次才判定链路断开，单次失败只留档\n3. 图标/触控/配对等非致命问题改为诊断信息，不再污染连接状态\n4. 加密库不可用时直接走明文握手，避免握手必然失败\n5. Android USB 打开失败时回退原生 USB 通道；会话异常结束后按退避间隔自动重连\n6. 设置 → 高级功能新增 USB 权限状态；连接详情展示系统、设备枚举与授权信息\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>\n"
 }

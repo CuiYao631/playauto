@@ -164,6 +164,8 @@ public final class MainActivity extends Activity {
     private boolean activityVisible;
     private boolean hostPageRequested;
     private boolean requestingMicrophone;
+    /** 最近一次视频解码失败原因；非空时首页给出可操作的提示而不是「连接失败」。 */
+    private String videoError;
     /** 已绑定长按的按键状态机：按住满 800ms 立即触发长按，无需等松手。 */
     private final SteeringProtocol.PressState steeringPress = new SteeringProtocol.PressState();
     /** 厂家语音键的长按状态机，与 Android 按键互不干扰。 */
@@ -259,6 +261,7 @@ public final class MainActivity extends Activity {
             if (!phonePlugged) {
                 hostPageRequested = false;
                 videoStarted = false;
+                videoError = null;
                 lastVideoWidth = lastVideoHeight = 0;
                 videoRenderer.setVisibility(View.GONE);
                 setProjectionMode(false);
@@ -479,7 +482,13 @@ public final class MainActivity extends Activity {
         videoRenderer = new H264SurfaceRenderer(this, new H264SurfaceRenderer.Listener() {
             @Override
             public void onDecoderError(String error) {
-                runOnUiThread(() -> connectionStatus.setText("盒子：H.264 解码失败：" + error));
+                runOnUiThread(() -> {
+                    videoError = error;
+                    connectionStatus.setText("盒子：H.264 解码失败：" + error);
+                    ConnectionService service = connectionService;
+                    if (service != null) service.recordDiagnostic("视频解码失败：" + error);
+                    updateStage();
+                });
             }
 
             @Override
@@ -594,6 +603,8 @@ public final class MainActivity extends Activity {
                 getResources().getConfiguration().screenWidthDp - 132)));
         stagePrompt.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         stagePromptCard.addView(stagePrompt);
+        stagePromptCard.setContentDescription("连接状态，点击查看连接详情");
+        stagePromptCard.setOnClickListener(view -> showConnectionDetails());
         stageSpinner = new Widgets.Spinner(this);
         stageSpinner.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         LinearLayout.LayoutParams spinnerParams = new LinearLayout.LayoutParams(dp(18), dp(18));
@@ -691,6 +702,10 @@ public final class MainActivity extends Activity {
             prompt = "连接中，请稍等...";
             dotColor = Ui.WARNING;
             connecting = true;
+        } else if (videoError != null) {
+            // 链路正常但画面解不出来：提示改解码方式，拔插盒子没用。
+            prompt = "画面解码失败（" + videoError + "），请在设置 → 解码方式改用软解";
+            dotColor = Ui.WARNING;
         } else if (phone == Ui.STATE_ERROR) {
             prompt = "手机连接失败，请检查蓝牙与Wi-Fi后重试";
             dotColor = Ui.ERROR;
@@ -720,12 +735,24 @@ public final class MainActivity extends Activity {
     }
 
     void showConnectionDetails() {
+        ConnectionService service = connectionService;
+        StringBuilder message = new StringBuilder()
+                .append("盒子：").append(connectionStateLabel(connectionStatus.getState()))
+                .append('\n').append(connectionStatus.getText())
+                .append("\n\n手机：").append(connectionStateLabel(phoneStatus.getState()))
+                .append('\n').append(phoneStatus.getText());
+        if (service != null) message.append("\n\n").append(service.usbDiagnostics());
         new AlertDialog.Builder(this)
                 .setTitle("连接详情")
-                .setMessage("盒子：" + connectionStateLabel(connectionStatus.getState())
-                        + "\n\n手机：" + connectionStateLabel(phoneStatus.getState()))
+                .setMessage(message)
                 .setPositiveButton("知道了", null)
                 .show();
+    }
+
+    /** 供「高级功能 → USB 权限状态」直接显示，连接服务尚未就绪时给出说明。 */
+    String connectionDiagnostics() {
+        ConnectionService service = connectionService;
+        return service == null ? "连接服务未就绪，请返回首页稍候" : service.usbDiagnostics();
     }
 
     private static String connectionStateLabel(int state) {
@@ -1640,6 +1667,8 @@ public final class MainActivity extends Activity {
     void onDecoderChanged() {
         int mode = getPreferences(MODE_PRIVATE).getInt("decoder_mode", VideoOptions.HARDWARE);
         videoRenderer.setDecoderMode(mode);
+        videoError = null;
+        connectionStatus.setText("盒子：已切换解码方式，等待关键帧");
         Toast.makeText(this, mode == 3 ? "已切换原版 OpenH264，固定使用 OpenGL ES 2.0 渲染"
                         : "已切换解码方式；设备不支持时会报告解码错误",
                 Toast.LENGTH_LONG).show();

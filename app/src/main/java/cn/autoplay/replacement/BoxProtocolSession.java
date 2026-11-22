@@ -18,6 +18,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 public final class BoxProtocolSession implements AutoCloseable {
+    private static final String TAG = "AutoPlayProtocol";
     private static final int CMD_OPEN = 1;
     private static final int CMD_PLUG = 2;
     private static final int CMD_PHASE = 3;
@@ -76,6 +77,8 @@ public final class BoxProtocolSession implements AutoCloseable {
     private static final int OPEN_RETRY_INTERVAL_MS = 1000;
     private static final int MAX_OPEN_RETRIES = 12;
     private static final long HEARTBEAT_INTERVAL_MS = 2000L;
+    /** 连续多少次心跳写失败才判定链路断开（单次超时通常只是 USB 忙）。 */
+    private static final int MAX_HEARTBEAT_FAILURES = 3;
     // Short grace period so the box can reconnect a paired phone on its own first.
     private static final long AUTO_CONNECT_DELAY_MS = 2000L;
     /**
@@ -162,6 +165,15 @@ public final class BoxProtocolSession implements AutoCloseable {
         }
 
         default void onSessionEnded() {
+        }
+
+        /**
+         * 非致命问题（单条命令发送失败、触控/图标/配对等辅助操作失败）。
+         *
+         * <p>这类问题不会中断 USB 会话，视频与心跳仍可正常工作，因此不能当作
+         * 「连接失败」展示，只在连接详情里留档，避免误导用户去拔插盒子。
+         */
+        default void onDiagnostic(String message) {
         }
     }
 
@@ -419,13 +431,13 @@ public final class BoxProtocolSession implements AutoCloseable {
                 } catch (IOException exception) {
                     if (!closed) {
                         if (listener != null) listener.onError("设置或控制命令发送失败", exception);
-                        publish("设置或控制命令发送失败：" + exception.getMessage());
+                        publishDiagnostic("设置或控制命令发送失败：" + exception.getMessage());
                     }
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException exception) {
             if (!closed) {
-                publish("设置或控制命令队列已停止");
+                publishDiagnostic("设置或控制命令队列已停止");
             }
         }
     }
@@ -449,7 +461,13 @@ public final class BoxProtocolSession implements AutoCloseable {
             boolean cryptFallbackSent = false;
             int boxVersionCode = BoxOpenRequest.DEFAULT_BOX_VERSION_CODE;
             String boxSoftwareVersion = null;
-            sendEnableCrypt();
+            if (cryptCapable()) {
+                sendEnableCrypt();
+            } else {
+                // 不能加密却先要求盒子切加密模式，会让盒子用本机读不了的
+                // 0x55BB55BB 帧回包，握手必然失败。这种情况直接走明文（旧固件兼容路径）。
+                publishDiagnostic("加密库不可用，按未加密方式握手");
+            }
             sendOpen(false, boxVersionCode);
             publish("已发送 CarPlay 协议握手，等待车机盒响应");
 
@@ -644,6 +662,14 @@ public final class BoxProtocolSession implements AutoCloseable {
         writeFrame(ProtocolFrame.encodeLegacy(CMD_ENABLE_CRYPT, payload));
     }
 
+    /** 本机能否真正加解密：JNI 加载成功且独立进程探针确认可用。 */
+    private static boolean cryptCapable() {
+        if (!BoxCore.isAvailable()) return false;
+        // 探针在服务启动时就已发起（超时 4 秒），这里等它给出结论，
+        // 宁可晚一点握手，也不要在一台本来能加密的机器上误判成不可用。
+        return CryptoSupport.awaitUsable(5000);
+    }
+
     private synchronized void sendOpen(boolean encrypt, int boxVersionCode) throws IOException {
         byte[] payload = BoxOpenRequest.createPayload(width, height, frameRate, boxVersionCode);
         byte[] frame = ProtocolFrame.encode(CMD_OPEN, payload, encrypt, nonce);
@@ -673,7 +699,7 @@ public final class BoxProtocolSession implements AutoCloseable {
                 uploadFile("/etc/airplay.conf\0", config.getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 publish("CarPlay 汽车图标已同步到车机盒：" + logo.displayName);
             } catch (IOException exception) {
-                publish("CarPlay 汽车图标同步失败：" + exception.getMessage());
+                publishDiagnostic("CarPlay 汽车图标同步失败：" + exception.getMessage());
             }
         }, "autoplay-car-logo-upload");
         uploadThread.setDaemon(true);
@@ -780,7 +806,7 @@ public final class BoxProtocolSession implements AutoCloseable {
             publish("固件已下发到盒子，等待盒子回报升级进度");
             return true;
         } catch (IOException exception) {
-            publish("固件下发失败：" + exception.getMessage());
+            publishDiagnostic("固件下发失败：" + exception.getMessage());
             if (listener != null) listener.onError("固件下发失败", exception);
             return false;
         }
@@ -855,7 +881,7 @@ public final class BoxProtocolSession implements AutoCloseable {
      */
     public boolean requestManualDisconnect() {
         if (closed) {
-            publish("断开手机失败：连接已关闭");
+            publishDiagnostic("断开手机失败：连接已关闭");
             return false;
         }
         // 先占住抑制窗口：即使这一帧写失败，也要避免随后触发的自动回连
@@ -907,6 +933,7 @@ public final class BoxProtocolSession implements AutoCloseable {
         }
         heartbeatStarted = true;
         Thread heartbeatThread = new Thread(() -> {
+            int consecutiveFailures = 0;
             while (!closed) {
                 try {
                     Thread.sleep(HEARTBEAT_INTERVAL_MS);
@@ -917,9 +944,21 @@ public final class BoxProtocolSession implements AutoCloseable {
                 if (!closed && protocolReady) {
                     try {
                         writeFrame(ProtocolFrame.encode(170, new byte[0], cryptEnabled, nonce));
+                        consecutiveFailures = 0;
                     } catch (IOException exception) {
-                        publish("盒子心跳发送失败：" + exception.getMessage());
-                        return;
+                        // 单次写超时多是 USB 忙，不能因此判定整个连接失败；
+                        // 连续失败才说明链路真的断了，交给上层重连。
+                        consecutiveFailures++;
+                        publishDiagnostic("盒子心跳发送失败（第 "
+                                + consecutiveFailures + " 次）：" + exception.getMessage());
+                        if (consecutiveFailures >= MAX_HEARTBEAT_FAILURES) {
+                            publish("盒子心跳连续发送失败，正在重新连接");
+                            close();
+                            // close() 会让读线程静默退出（finally 里不再回调），
+                            // 所以这里显式通知上层释放连接并重连。
+                            if (listener != null) listener.onSessionEnded();
+                            return;
+                        }
                     }
                 }
             }
@@ -955,7 +994,7 @@ public final class BoxProtocolSession implements AutoCloseable {
                 try {
                     writeFrame(ProtocolFrame.encode(23, data, cryptEnabled, nonce));
                 } catch (IOException exception) {
-                    publish("触控事件发送失败：" + exception.getMessage());
+                    publishDiagnostic("触控事件发送失败：" + exception.getMessage());
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
@@ -1241,14 +1280,14 @@ public final class BoxProtocolSession implements AutoCloseable {
      */
     public boolean requestAutoConnectTo(String mac) {
         if (closed || !protocolReady) {
-            publish("指定回连失败：协议未就绪");
+            publishDiagnostic("指定回连失败：协议未就绪");
             return false;
         }
         byte[] payload;
         try {
             payload = createAutoConnectAddressPayload(mac);
         } catch (IllegalArgumentException exception) {
-            publish("指定回连失败：" + exception.getMessage());
+            publishDiagnostic("指定回连失败：" + exception.getMessage());
             return false;
         }
         try {
@@ -1259,7 +1298,7 @@ public final class BoxProtocolSession implements AutoCloseable {
             autoConnectSuppressedUntil = 0;
             return true;
         } catch (IOException exception) {
-            publish("指定回连失败：" + exception.getMessage());
+            publishDiagnostic("指定回连失败：" + exception.getMessage());
             if (listener != null) listener.onError("指定回连失败", exception);
             return false;
         }
@@ -1305,7 +1344,7 @@ public final class BoxProtocolSession implements AutoCloseable {
      */
     public boolean sendPairedDeviceList(List<PairedDevice> devices) {
         if (closed || !protocolReady) {
-            publish("写回配对列表失败：协议未就绪");
+            publishDiagnostic("写回配对列表失败：协议未就绪");
             return false;
         }
         List<PairedDevice> snapshot = devices == null
@@ -1322,7 +1361,7 @@ public final class BoxProtocolSession implements AutoCloseable {
             }
             return true;
         } catch (IOException exception) {
-            publish("写回配对列表失败：" + exception.getMessage());
+            publishDiagnostic("写回配对列表失败：" + exception.getMessage());
             if (listener != null) listener.onError("写回配对列表失败", exception);
             return false;
         }
@@ -1336,7 +1375,7 @@ public final class BoxProtocolSession implements AutoCloseable {
      */
     public boolean removePairedDevice(String mac) {
         if (!isValidBluetoothMac(mac)) {
-            publish("删除配对失败：蓝牙地址格式不正确");
+            publishDiagnostic("删除配对失败：蓝牙地址格式不正确");
             return false;
         }
         String target = mac.toUpperCase(java.util.Locale.ROOT).replace('-', ':');
@@ -1350,7 +1389,7 @@ public final class BoxProtocolSession implements AutoCloseable {
             remaining.add(device);
         }
         if (!found) {
-            publish("删除配对失败：列表里没有 " + target);
+            publishDiagnostic("删除配对失败：列表里没有 " + target);
             return false;
         }
         boolean sent = sendPairedDeviceList(remaining);
@@ -1392,7 +1431,7 @@ public final class BoxProtocolSession implements AutoCloseable {
                             CMD_AUTO_CONNECT, payload, cryptEnabled, nonce));
                     publish("已在手机等待阶段请求盒子自动连接");
                 } catch (IOException exception) {
-                    publish("自动连接请求失败：" + exception.getMessage());
+                    publishDiagnostic("自动连接请求失败：" + exception.getMessage());
                     autoConnectRequested = false;
                 }
             } else {
@@ -1430,7 +1469,8 @@ public final class BoxProtocolSession implements AutoCloseable {
         byte[] payload = readFully(header.getPayloadLength(), 10000);
         if (header.isCryptFrame()) {
             if (!cryptEnabled) {
-                throw new IOException("Received a crypt frame before crypt negotiation");
+                throw new IOException("车机盒已切到加密模式，但本机加密库不可用"
+                        + "（多为 32 位系统且 libnx1.so 未打补丁），无法解密");
             }
             payload = ProtocolFrame.decodePayload(header, payload, nonce);
         }
@@ -1508,6 +1548,14 @@ public final class BoxProtocolSession implements AutoCloseable {
     private void publish(String status) {
         if (listener != null) {
             listener.onStatus(status);
+        }
+    }
+
+    /** 非致命问题：只在连接详情留档，不改变连接状态。 */
+    private void publishDiagnostic(String message) {
+        Log.i(TAG, message);
+        if (listener != null) {
+            listener.onDiagnostic(message);
         }
     }
 

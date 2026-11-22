@@ -368,6 +368,68 @@ public final class ConnectionService extends Service {
         return connection instanceof NativeUsbConnection;
     }
 
+    /**
+     * 连接失败时的可读诊断信息，供「连接详情」直接展示。
+     *
+     * <p>车机（尤其 Android 4.4）上拿不到 logcat，所以把判定失败所依赖的状态
+     * 全部摊开：系统与机型、是否系统应用、USB 设备枚举结果、各条授权路径的
+     * 最近结果、当前通道以及原生加密库是否可用。
+     */
+    String usbDiagnostics() {
+        StringBuilder text = new StringBuilder();
+        text.append("Android ").append(Build.VERSION.RELEASE)
+                .append("（API ").append(Build.VERSION.SDK_INT).append("）")
+                .append("\n机型：").append(Build.MODEL);
+
+        boolean systemApp = false;
+        try {
+            ApplicationInfo info = getPackageManager()
+                    .getApplicationInfo(getPackageName(), 0);
+            systemApp = (info.flags & (ApplicationInfo.FLAG_SYSTEM
+                    | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
+        } catch (PackageManager.NameNotFoundException ignored) {
+            // 本应用必然已安装，忽略即可
+        }
+        text.append("\n系统应用：").append(systemApp ? "是" : "否")
+                .append("；MANAGE_USB：")
+                .append(hasUsbManagementPermission() ? "已授予" : "未授予");
+
+        text.append("\n\nUSB 设备：");
+        int found = 0;
+        int targets = 0;
+        if (usbManager == null) {
+            text.append("\n  USB 服务不可用（UsbManager 为空）");
+        } else {
+            for (UsbDevice device : usbManager.getDeviceList().values()) {
+                found++;
+                boolean target = isTarget(device);
+                if (target) targets++;
+                text.append("\n  ")
+                        .append(String.format(java.util.Locale.US, "%04X:%04X",
+                                device.getVendorId(), device.getProductId()))
+                        .append(target ? "（盒子）" : "（非盒子）")
+                        .append(device.getDeviceName() == null ? "" : " " + device.getDeviceName())
+                        .append(target
+                                ? "，权限：" + (usbManager.hasPermission(device) ? "有" : "无") : "");
+            }
+        }
+        if (found == 0) text.append("\n  系统未枚举到任何 USB 设备");
+        else if (targets == 0) text.append("\n  未发现目标盒子（需要 VID 1314，PID 1520/1521）");
+
+        text.append("\n\n当前通道：").append(connection == null
+                ? "未连接" : connection.name()
+                        + (deviceName == null ? "" : "（" + deviceName + "）"));
+        text.append("\n系统授权：").append(usbPermissionDiagnostic);
+        text.append("\n旧系统授权：").append(legacyUsbPermissionDiagnostic);
+        text.append("\n").append(rootUsbPermissionDiagnostic);
+        text.append("\n原生加密库：").append(CryptoSupport.describe());
+        if (!diagnosticLog.isEmpty()) {
+            text.append("\n\n非致命问题（不影响连接）：");
+            for (String line : diagnosticLog) text.append("\n  ").append(line);
+        }
+        return text.toString();
+    }
+
     void requestRootUsbPermission() {
         if (rootUsbPending) {
             Log.w(TAG, "Root USB authorization already pending");
@@ -453,6 +515,29 @@ public final class ConnectionService extends Service {
         try {
             Log.i(TAG, "打开 Android USB 设备");
             connection = UsbConnection.open(usbManager, device);
+        } catch (IOException | SecurityException | IllegalArgumentException exception) {
+            Log.e(TAG, "Android USB 打开失败，改用原生 USB 通道", exception);
+            try {
+                // 部分 Android 4.x 车机的框架通道拿不到端点或 claim 失败，
+                // 原版应用在这些机器上走的就是 libusb（libconnection）。
+                connection = NativeUsbConnection.open(
+                        device.getVendorId(), device.getProductId());
+            } catch (IOException | LinkageError fallback) {
+                Log.e(TAG, "Android USB 连接初始化失败", exception);
+                Log.e(TAG, "Cannot open USB device", exception);
+                closeConnection();
+                setBoxStatus("盒子：连接失败：" + exception.getMessage()
+                        + "；原生通道：" + fallback.getMessage());
+                // 已授权（或 4.4 系统应用可走 MANAGE_USB 静默授权）时才自动重试；
+                // 需要用户点系统弹窗的情况交给用户操作。
+                if (usbManager != null && (usbManager.hasPermission(device)
+                        || (Build.VERSION.SDK_INT <= 20 && hasUsbManagementPermission()))) {
+                    scheduleReconnect();
+                }
+                return;
+            }
+        }
+        try {
             deviceName = device.getDeviceName();
             Log.i(TAG, "初始化连接音频");
             playback.close();
@@ -461,7 +546,8 @@ public final class ConnectionService extends Service {
             setBoxStatus("盒子：" + connection.name() + " 通道已建立");
             setPhoneStatus("手机：等待盒子状态");
             startProtocol();
-        } catch (IOException | SecurityException | IllegalArgumentException exception) {
+            cancelReconnect();
+        } catch (SecurityException | IllegalArgumentException exception) {
             Log.e(TAG, "USB 连接初始化失败", exception);
             closeConnection();
             Log.e(TAG, "Cannot open USB device", exception);
@@ -604,7 +690,13 @@ public final class ConnectionService extends Service {
                     closeConnection();
                     setBoxStatus(failure);
                     Log.w(TAG, "Protocol session ended; USB/audio and wake lock released");
+                    // 会话异常结束通常只是一次 USB 抖动：盒子本身仍在工作，
+                    // 若不自动重试，界面会一直停在「连接失败，请重新插拔设备」。
+                    scheduleReconnect();
                 });
+            }
+            @Override public void onDiagnostic(String message) {
+                dispatch(epoch, () -> recordDiagnostic(message));
             }
         });
         refreshSettings();
@@ -863,6 +955,62 @@ public final class ConnectionService extends Service {
         notifyClient();
     }
 
+    private final java.util.ArrayDeque<String> diagnosticLog = new java.util.ArrayDeque<>();
+    private int reconnectAttempt;
+    private static final long[] RECONNECT_DELAYS_MS = {2000L, 4000L, 8000L, 15000L, 30000L};
+    /** 自动重连上限：约 2+4+8+15+30×6 ≈ 3.5 分钟后转为等待用户操作。 */
+    private static final int MAX_RECONNECT_ATTEMPTS = 10;
+    private final Runnable reconnectRunnable = () -> {
+        if (destroyed || connection != null) {
+            reconnectAttempt = 0;
+            return;
+        }
+        if (!hasTargetDevice()) {
+            // 盒子已拔出：不再重试，等 USB_DEVICE_ATTACHED 广播
+            reconnectAttempt = 0;
+            return;
+        }
+        Log.i(TAG, "自动重连第 " + (reconnectAttempt + 1) + " 次");
+        // 重试的收尾由 openDevice 决定：成功即清零，失败会再排一次。
+        connectAttached();
+    };
+
+    private boolean hasTargetDevice() {
+        if (usbManager == null) return false;
+        for (UsbDevice device : usbManager.getDeviceList().values()) {
+            if (isTarget(device)) return true;
+        }
+        return false;
+    }
+
+    /** 非致命问题留档，供「连接详情」查看，不改变连接状态。 */
+    void recordDiagnostic(String message) {
+        String line = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                .format(new java.util.Date()) + "  " + message;
+        diagnosticLog.addLast(line);
+        while (diagnosticLog.size() > 20) diagnosticLog.removeFirst();
+        Log.i(TAG, "诊断：" + message);
+    }
+
+    /** 会话异常结束后按退避间隔自动重试，避免一直卡在「连接失败」。 */
+    private void scheduleReconnect() {
+        if (destroyed) return;
+        if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+            Log.w(TAG, "自动重连已达上限，等待用户拔插盒子或重新打开应用");
+            return;
+        }
+        long delay = RECONNECT_DELAYS_MS[
+                Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+        reconnectAttempt++;
+        handler.removeCallbacks(reconnectRunnable);
+        handler.postDelayed(reconnectRunnable, delay);
+    }
+
+    private void cancelReconnect() {
+        reconnectAttempt = 0;
+        handler.removeCallbacks(reconnectRunnable);
+    }
+
     private void setPhoneStatus(String status) {
         phoneStatus = status;
         notifyClient();
@@ -919,6 +1067,7 @@ public final class ConnectionService extends Service {
     }
 
     private void closeConnection() {
+        cancelReconnect();
         clearNavigationState("盒子未连接，等待导航数据");
         generation++;
         BoxProtocolSession old = session;

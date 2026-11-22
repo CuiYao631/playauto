@@ -212,7 +212,9 @@ final class Ui {
     }
 
     static int classifyBox(String message, int current) {
-        if (message.contains("音频") || message.contains("图标")) {
+        // 音频、图标、视频解码都是「链路已建立」之后的功能问题，
+        // 拔插盒子也无法解决，不能据此把首页判定成「设备连接失败」。
+        if (message.contains("音频") || message.contains("图标") || message.contains("解码")) {
             return current;
         }
         if (containsAny(message, "失败", "未通过", "无效", "异常", "未响应", "未加载", "已中断", "无法绑定")) {

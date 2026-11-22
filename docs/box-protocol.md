@@ -51,6 +51,11 @@ USB 层不做任何加解密，字节流原样收发。
 > `0x55BB55BB` 不只是标记位：非白名单命令在写帧前会调用
 > `BoxCore.stCheck(true, payload, nonce, payload)` 就地加密，读帧时再用
 > `stCheck(false, ...)` 解密。所以主机与盒子必须共享同一个 32 位 nonce。
+>
+> **能力门控**：`playAuto` 只有在独立进程探针确认 `libnx1` 可用时才下发
+> `240 CMD_ENABLE_CRYPT`。加密库不可用（当前仅 `arm64-v8a` 打了
+> `tools/patch-libnx1.py` 的补丁，`armeabi`/`x86` 的 `stCheck` 会杀死进程）
+> 时直接走明文握手：否则盒子会按加密模式回包，主机又解不开，握手必然失败。
 
 ---
 

@@ -926,17 +926,60 @@ public final class MainActivity extends Activity {
                 .setMessage("原版用系统真实存在的第二块屏幕（仪表屏）显示副屏画面。"
                         + "本功能改用悬浮窗模拟副屏，把盒子下发的副屏视频流（CMD 44）"
                         + "渲染到可拖动、可缩放的窗口里。"
+                        + "\n\n同时叠加盒子上报的导航与歌词文字（CMD 42）："
+                        + "上方显示「距离 + 路名」和「剩余时间 | 剩余距离」并带转向箭头，"
+                        + "下方显示当前歌词（无歌词时显示歌名 · 歌手）。"
+                        + "文字使用半透明黑底，不会遮挡盒子自己绘制的 HUD。"
                         + "\n\n拖动窗口可移动位置；右下角「◢」拖动改变宽度，高度按画面比例自动调整；"
                         + "右上角「×」关闭（会同时关闭本开关）。位置与大小会保存。"
                         + "\n\n需要「显示在其他应用上层」权限。窗口只负责显示，不转发触摸——"
                         + "副屏坐标属于另一块屏，直接按主屏坐标发送会被盒子误判。"
-                        + "\n\n如果盒子固件不上报副屏能力（supportFeatures 不含 naviScreen），"
-                        + "窗口会一直停在「等待盒子画面」。")
+                        + "\n\n导航数据要求手机处于真实路线引导中且 CarPlay 在前台；"
+                        + "歌词依赖 CarPlay NowPlaying。没有数据时窗口会停在「等待盒子画面」。")
                 .setPositiveButton("知道了", null)
                 .show();
     }
 
-    void openOverlayPermission() {        Intent intent = new Intent(Build.VERSION.SDK_INT >= 23
+    // ---- 盒子指令日志窗口 ----
+
+    void onBoxLogOverlayChanged(boolean enabled) {
+        if (enabled && !AndroidCompat.canDrawOverlays(this)) {
+            Toast.makeText(this, "日志窗口需要「显示在其他应用上层」权限，请先授权",
+                    Toast.LENGTH_LONG).show();
+            openOverlayPermission();
+        }
+        ConnectionService service = connectionService;
+        if (service != null) service.refreshBoxLogOverlay();
+    }
+
+    void showBoxLogOverlayHelp() {
+        new AlertDialog.Builder(this)
+                .setTitle("盒子指令日志窗口")
+                .setMessage("用悬浮窗实时显示盒子上报的命令（盒子 → 主机），"
+                        + "用于排查连接、投屏与副屏问题。"
+                        + "\n\n每行格式：时间  命令号  协议名  负载字节数  首个整数值"
+                        + "（连接阶段 / 子命令 / 升级状态 / 手机类型）。"
+                        + "\n\n视频帧（6）、音频帧（7）、副屏帧（44）数量很大，"
+                        + "按每秒汇总成一行计数，避免刷屏；其他控制命令逐条显示。"
+                        + "\n\n拖动标题栏可移动；「清空」丢弃已记录的日志；"
+                        + "「×」关闭窗口并同时关闭本开关。保留最近 200 条，最新在最上面。"
+                        + "\n\n日志只在本次应用运行期间保留，服务销毁后清空。"
+                        + "需要「显示在其他应用上层」权限。")
+                .setPositiveButton("知道了", null)
+                .show();
+    }
+
+    void clearBoxCommandLog() {
+        ConnectionService service = connectionService;
+        if (service == null) {
+            Toast.makeText(this, "连接服务尚未就绪", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        service.clearBoxCommandLog();
+    }
+
+    void openOverlayPermission() {
+        Intent intent = new Intent(Build.VERSION.SDK_INT >= 23
                 ? android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION
                 : android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 android.net.Uri.parse("package:" + getPackageName()));
@@ -959,6 +1002,17 @@ public final class MainActivity extends Activity {
     String navigationLogText() {
         return connectionService == null ? "连接服务尚未就绪，等待连接…"
                 : connectionService.navigationLogText();
+    }
+
+    /** 「仪表导航」页顶部的当前状态：导航文字 + 歌词 + 子类型诊断。 */
+    String dashboardText() {
+        ConnectionService service = connectionService;
+        if (service == null) {
+            return "连接服务尚未就绪，等待连接…";
+        }
+        return service.navigationText() + "\n" + service.maneuverDebugText()
+                + "\n\n歌词\n" + service.mediaText()
+                + "\n\n" + service.dashboardSubtypeSummary();
     }
 
     String boxNameText(boolean bluetooth) {

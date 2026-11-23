@@ -171,7 +171,7 @@ USB 层不做任何加解密，字节流原样收发。
 | 25 | `CMD_BOX_INFO` | N | 盒子信息串（uuid / mfd / model 等） |
 | 42 | `CMD_DASHBOARD_DATA` | N | 仪表数据，`1`=文本 `2/3`=封面图 `100/200`=JSON `202/203`=原始 |
 | 43 | `CMD_CONNECTION_PIN_CODE` | 4 + N | 手机类型 + 连接 PIN 码（**仅 HiCar/Carlink 使用，不实现**） |
-| 44 | `CMD_DASHBOARD_FRAME` | 20 + N | 副屏视频帧（**容器固件不支持副屏，不实现**） |
+| 44 | `CMD_DASHBOARD_FRAME` | 20 + N | 副屏视频帧；20 B 头同主屏（1 中 `12` 偏移为时间戳），H.264 从偏移 20 开始 |
 | 119 | `CMD_APP_RESET` | 4 B | 要求 App 重置 |
 | 136 | `CMD_DEBUG_TEST` | 4 B | 调试 |
 | 153 | `CMD_FILE` | 见 §8 | 从盒子拉取文件（log / apk） |
@@ -457,7 +457,7 @@ sequenceDiagram
 | 19 / 24 / 43 / 8-1013 | ⛔ **不实现**：HiCar/Carlink 相关，常安车机已确认无此功能 |
 | 22 `CAMERA_INFO` | ⛔ **不实现**：车机无摄像头，且不属于 CarPlay 功能 |
 | 8 上报的 `7/8/15` | ⛔ **不实现**：麦克风固定车载，不参与来源协商 |
-| 44 `DASHBOARD_FRAME` | ⛔ **不实现**：容器固件不支持副屏（`supportFeatures` 不含 `naviScreen`） |
+| 44 `DASHBOARD_FRAME` | ✅ dev 分支：用 `TYPE_APPLICATION_OVERLAY` 悬浮窗模拟副屏，见 §16.1 |
 
 ### 未实现清单
 
@@ -489,17 +489,57 @@ sequenceDiagram
 | 43 | `CONNECTION_PIN_CODE` | **已确认无 HiCar**（原版仅 phoneType 6/7 = HiCar/Carlink） |
 | 22 | `CAMERA_INFO`（收发两侧） | **车机无摄像头**，不属于 CarPlay 功能 |
 | 8 上报 `7/8/15` | 麦克风来源协商 | **麦克风固定车载**，不属于 CarPlay 功能 |
-| 44 | `DASHBOARD_FRAME`（副屏） | **已实测盒子固件不提供副屏能力**，`supportFeatures` 无 `naviScreen` |
+| 44 | `DASHBOARD_FRAME`（副屏） | 盒子上报 `supportFeatures` 无 `naviScreen` 时不会发；dev 分支改用悬浮窗模拟副屏接收 |
 
 半实现项：
 
 - `42 CMD_DASHBOARD_DATA` 只处理 subtype `200`（导航 JSON）；缺 `1` 文本、`2/3` 封面图、`100` JSON、`202/203` 原始
 - `8 CMD_CARPLAY` 上报缺 `500/501`（断连/重连提示）、`1000`（支持 WiFi）、`1003~1006`、`1011/1012`（需 KO）；`7/8/15` 麦克风协商按上表不做
 - `6 CMD_VIDEO_FRAME` 的 `flags` 解析出来但未使用：`bit2-3` 压缩方式因固定 H.264 无需切换；`bit0` 熄屏编码未处理（原版广播 10/11）
-- `25 CMD_BOX_SETTINGS` 只发 4 个单键 JSON；缺 `naviScreenInfo`（副屏画布，随 cmd 44 一并放弃）、`ViewAreaInfo`（多窗口）、`cornerMasks`、`MapThemeMode`、`GNSSCapability`、`fps/dpi/尺寸`
+- `25 CMD_BOX_SETTINGS` 只发单键 JSON；已实现 `DashboardInfo`、`naviScreenInfo`（副屏画布）、DPI、名称等，缺 `ViewAreaInfo`（多窗口）、`cornerMasks`、`MapThemeMode`、`GNSSCapability`
 - `4 CMD_PLUGOUT` 未区分值 `1`（手机端主动断开）
 - `1 CMD_OPEN` 收到空负载时不会按原版重发 `g_Open`
 - 未知命令被静默丢弃，无日志
+
+### 16.1 副屏（仪表投射）的启动条件
+
+原版靠 `android.app.Presentation` 绑定系统里真实存在的第二块 `Display`，因此只有当
+`CMD_BOX_INFO` 的 `supportFeatures` 含 `naviScreen` 时才成立。dev 分支改为用
+`TYPE_APPLICATION_OVERLAY` 悬浮窗承载 `H264SurfaceRenderer`，直接消费
+`CMD_DASHBOARD_FRAME`(44)。
+
+**盒子是否下发 cmd 44，取决于它是否收到过副屏尺寸**：
+
+1. 需要 `CMD_BOX_SETTINGS`(25) 里带 `DashboardInfo`（playAuto 固定发 `7`）。
+2. 还需要 `naviScreenInfo`：`fps` / `dpi` / `width` / `height` /
+   `safearea{width,height,x,y,outside}`，来自悬浮窗的实际像素尺寸。
+
+> 悬浮窗在 USB 握手前就已创建，此时 `protocolReady == false`。playAuto 会把尺寸
+> 缓存在 `pendingNaviScreenInfo`，并在三个时机补发：握手完成（`applyRuntimeConfig`）、
+> 手机插入（`CMD_PLUG`）、手机进入工作阶段（`CMD_PHASE` 3/6/8，5 秒节流）。
+> 早先直接丢弃未就绪请求，盒子就永远不知道副屏尺寸，悬浮窗只能停在
+> 「副屏：等待盒子画面」。
+
+帧格式与主屏一致：20 B 头（`0/4` = 宽高，`12` = 时间戳 ms）+ H.264 数据。
+悬浮窗只显示，不转发触摸——副屏坐标系下的点击用主屏 `CMD_MULTI_TOUCH`(23) 发出去
+会被盒子当成主屏点击。
+
+### 16.2 盒子指令日志窗口
+
+`BoxProtocolSession` 每读出一帧就回调
+`Listener.onBoxCommand(command, payloadLength, value)`，`value` 是命令中有意义的整数
+（`3` 阶段、`8` 子命令、`2` 手机类型、`177/187` 进度与状态），其余为 `-1`。
+`ConnectionService` 把它整理成下面格式存入 200 条环形缓冲，由
+`BoxLogOverlay` 悬浮窗显示（设置 → 更多设置 → 调试）：
+
+```
+12:34:56.789  3  CMD_PHASE  4 B  值=8
+12:34:57.000  6  CMD_VIDEO_FRAME ×30 帧；7 CMD_AUDIO_FRAME ×12 帧；44 CMD_DASHBOARD_FRAME ×30 帧
+```
+
+视频 `6` / 音频 `7` / 副屏 `44` 数量极大，只做计数并每秒汇总一行；其余控制命令
+逐条记录。窗口只在本次运行期间保留，`×` 关闭会同时关掉设置开关，`清空` 丢弃
+已记录内容。
 
 ### 固件升级链路（已打通）
 

@@ -30,6 +30,59 @@ public final class ProtocolFrameSelfTest {
         testFrameRateNormalization();
         testNightModeSelection();
         testUpdateComparison();
+        testBoxCommandNaming();
+        testDashboardTextFormatting();
+    }
+
+    private static void testDashboardTextFormatting() {
+        // 距离/时间格式化（对齐原版 util/n0.b、util/n0.c）
+        check("53m".equals(NavigationText.distance(53)), "distance < 1km uses meters");
+        check("5.6km".equals(NavigationText.distance(5600)), "distance formats one decimal");
+        check("8km".equals(NavigationText.distance(8000)), "integer km drops decimals");
+        check("45秒".equals(NavigationText.duration(45)), "duration under one minute");
+        check("22分钟".equals(NavigationText.duration(1320)), "duration whole minutes");
+        check("1小时30分钟".equals(NavigationText.duration(5400)), "duration hours and minutes");
+
+        NavigationText empty = new NavigationText();
+        check(!empty.hasContent(), "fresh navigation state has no content");
+        check(!empty.shouldShow(0L), "fresh navigation state stays hidden");
+        check(empty.primaryLine().isEmpty(), "fresh navigation primary line empty");
+        check(empty.text().contains("等待盒子上报导航数据"), "fresh navigation shows waiting text");
+        check(empty.maneuver() == Maneuver.STRAIGHT, "fresh navigation defaults to straight");
+
+        // NaviOrderTypeNew 映射（样本来自真机 42/200 实抓）
+        check(Maneuver.fromOrderTypeNew(7, 2) == Maneuver.LEFT, "7 maps to left turn");
+        check(Maneuver.fromOrderTypeNew(4, 1) == Maneuver.SHARP_RIGHT, "4 maps to sharp right");
+        check(Maneuver.fromOrderTypeNew(8, -1) == Maneuver.SLIGHT_LEFT, "8 maps to slight left");
+        check(Maneuver.fromOrderTypeNew(2, 1) == Maneuver.SLIGHT_RIGHT, "2 maps to slight right");
+        check(Maneuver.fromOrderTypeNew(1, -1) == Maneuver.STRAIGHT, "1 maps to straight");
+        check(Maneuver.fromOrderTypeNew(5, -1) == Maneuver.UTURN, "5 maps to u-turn");
+        check(Maneuver.fromOrderTypeNew(9, -1) == Maneuver.ARRIVE, "9 maps to arrive");
+        check(Maneuver.fromOrderTypeNew(16, -1) == Maneuver.ROUNDABOUT,
+                "roundabout exit maps to roundabout");
+        // 未知值按方向兜底：1=右、2=左
+        check(Maneuver.fromOrderTypeNew(60, 1) == Maneuver.RIGHT, "unknown falls back to side 1");
+        check(Maneuver.fromOrderTypeNew(60, 2) == Maneuver.LEFT, "unknown falls back to side 2");
+        check(Maneuver.fromOrderTypeNew(-1, -1) == Maneuver.UNKNOWN, "no data is unknown");
+
+        MediaText media = new MediaText();
+        check(!media.hasContent(), "fresh media state has no content");
+        check(media.lyricLine().isEmpty(), "fresh media has no lyric line");
+    }
+
+    private static void testBoxCommandNaming() {
+        check("CMD_PHASE".equals(BoxProtocolSession.describeCommand(3)), "cmd 3 named");
+        check("CMD_CARPLAY_CMD".equals(BoxProtocolSession.describeCommand(8)), "cmd 8 named");
+        check("CMD_DASHBOARD_FRAME".equals(BoxProtocolSession.describeCommand(44)),
+                "cmd 44 named");
+        check(BoxProtocolSession.describeCommand(0x7FFF) == null, "unknown cmd unnamed");
+
+        byte[] phase = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(8).array();
+        check(BoxProtocolSession.commandValue(3, phase) == 8, "phase value parsed");
+        check(BoxProtocolSession.commandValue(8, phase) == 8, "carplay subcommand parsed");
+        check(BoxProtocolSession.commandValue(6, phase) == -1, "video frame has no value");
+        check(BoxProtocolSession.commandValue(3, new byte[2]) == -1, "short payload yields -1");
+        check(BoxProtocolSession.commandValue(3, null) == -1, "null payload yields -1");
     }
 
     private static void testUpdateComparison() {

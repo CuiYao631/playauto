@@ -100,8 +100,10 @@ final class NativeUsbConnection implements UsbTransport {
             if (!input) System.arraycopy(buffer, offset, data, 0, chunk);
             int count;
             try {
-                count = input ? driver.read(data, chunk, Math.min(timeoutMillis, 1000))
-                        : driver.write(data, chunk, Math.min(timeoutMillis, 1000));
+                // 读路径由调用方用 250 ms 轮询；写路径必须沿用到调用方给的超时
+                // （原版 bulkTransferOut 固定 4000 ms），否则盒子忙时 1 秒就会误判失败。
+                count = input ? driver.read(data, chunk, timeoutMillis)
+                        : driver.write(data, chunk, timeoutMillis);
             } catch (LinkageError | SecurityException exception) {
                 failure = "Native USB 收发接口失败：" + exception.getClass().getSimpleName();
                 throw new IOException(failure, exception);

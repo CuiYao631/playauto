@@ -11,6 +11,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
@@ -24,6 +25,10 @@ import android.widget.TextView;
  *
  * <p>交互：拖动窗口移动、「◢」拖动改变宽度（高度按帧宽高比自动推导）、「×」关闭。
  * 窗口位置与尺寸会持久化，重启后恢复。
+ *
+ * <p>除视频帧外，还会叠加盒子 {@code CMD_DASHBOARD_DATA 42} 上报的导航与歌词文字
+ * （见 {@link #setDashboardText}）：导航区在上（距离 + 路名 + 剩余时间/距离 + 转向箭头），
+ * 歌词区在下。文字只用半透明黑底，不会盖住盒子自己绘制的 HUD。
  *
  * <p>注意：副屏窗口只负责显示，不转发触摸事件——触摸坐标属于副屏坐标系，
  * 用主屏的 {@code CMD_MULTI_TOUCH}(23) 发送会被盒子当成主屏点击。
@@ -59,9 +64,21 @@ final class SecondaryScreenOverlay implements H264SurfaceRenderer.Listener, Auto
     private FrameLayout root;
     private H264SurfaceRenderer renderer;
     private TextView hint;
+    private LinearLayout navRow;
+    private TurnIconView navIcon;
+    private TextView navLine1;
+    private TextView navLine2;
+    private TextView lyricView;
     private WindowManager.LayoutParams params;
     private boolean showing;
     private boolean closed;
+
+    // 最近的文字状态，show()/重建视图后用它恢复（协议线程随时可能更新）
+    private String navPrimary = "";
+    private String navSecondary = "";
+    private Maneuver navManeuver = Maneuver.STRAIGHT;
+    private boolean navVisible;
+    private String lyricLine = "";
 
     /** 高 / 宽，由第一帧决定，未知时按 16:9 估算。 */
     private float aspect = DEFAULT_ASPECT;
@@ -137,6 +154,11 @@ final class SecondaryScreenOverlay implements H264SurfaceRenderer.Listener, Auto
             root = null;
             renderer = null;
             hint = null;
+            navRow = null;
+            navIcon = null;
+            navLine1 = null;
+            navLine2 = null;
+            lyricView = null;
         }
     }
 
@@ -156,6 +178,11 @@ final class SecondaryScreenOverlay implements H264SurfaceRenderer.Listener, Auto
         FrameLayout currentRoot = root;
         root = null;
         hint = null;
+        navRow = null;
+        navIcon = null;
+        navLine1 = null;
+        navLine2 = null;
+        lyricView = null;
         if (currentRoot != null) {
             try {
                 windowManager.removeView(currentRoot);
@@ -182,6 +209,31 @@ final class SecondaryScreenOverlay implements H264SurfaceRenderer.Listener, Auto
         }
         postToMain(() -> hideHint());
         target.submitFrame(frame);
+    }
+
+    /**
+     * 更新文字层：导航两行 + 转向箭头 + 歌词。
+     *
+     * <p>可在协议线程调用。文字只叠加在画面之上，不替代 H.264 副屏帧，
+     * 因此盒子自己画 HUD 时也不会互相遮挡（文字用半透明黑底）。
+     *
+     * @param primary   导航第一行，如 {@code "44m 进入 中贸街"}
+     * @param secondary 导航第二行，如 {@code "22分钟 | 8.6km"}
+     * @param maneuver  转向类型（决定箭头形状）
+     * @param showNav   是否显示导航区
+     * @param lyric     歌词区单行文本
+     */
+    void setDashboardText(String primary, String secondary, Maneuver maneuver,
+            boolean showNav, String lyric) {
+        navPrimary = primary == null ? "" : primary;
+        navSecondary = secondary == null ? "" : secondary;
+        navManeuver = maneuver == null ? Maneuver.STRAIGHT : maneuver;
+        navVisible = showNav;
+        lyricLine = lyric == null ? "" : lyric;
+        if (!showing || root == null) {
+            return;
+        }
+        postToMain(this::applyText);
     }
 
     /** 主动上报当前尺寸，用于连接建立后同步 {@code naviScreenInfo}。 */
@@ -227,6 +279,51 @@ final class SecondaryScreenOverlay implements H264SurfaceRenderer.Listener, Auto
         frame.addView(dragLayer, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
+        // 文字层：导航区在上、歌词区在下；全部非可点击，触摸会穿透到拖动层
+        LinearLayout textLayer = new LinearLayout(context);
+        textLayer.setOrientation(LinearLayout.VERTICAL);
+        textLayer.setPadding(Ui.dp(context, 8), Ui.dp(context, 8),
+                Ui.dp(context, 8), Ui.dp(context, 8));
+
+        navRow = new LinearLayout(context);
+        navRow.setOrientation(LinearLayout.HORIZONTAL);
+        navRow.setGravity(Gravity.CENTER_VERTICAL);
+        navRow.setBackground(Ui.rounded(0x99000000, Ui.dp(context, 8)));
+        navRow.setPadding(Ui.dp(context, 6), Ui.dp(context, 4),
+                Ui.dp(context, 10), Ui.dp(context, 4));
+        navIcon = new TurnIconView(context);
+        navRow.addView(navIcon, new LinearLayout.LayoutParams(
+                Ui.dp(context, 34), Ui.dp(context, 34)));
+        LinearLayout navColumn = new LinearLayout(context);
+        navColumn.setOrientation(LinearLayout.VERTICAL);
+        navLine1 = Ui.text(context, "", 15, 0xFFFFFFFF, true);
+        navLine2 = Ui.text(context, "", 12, 0xCCFFFFFF, false);
+        navColumn.addView(navLine1);
+        navColumn.addView(navLine2);
+        navRow.addView(navColumn, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        // 右上角有关闭按钮，给导航条留出右侧空间，避免长路名被压住
+        LinearLayout.LayoutParams navParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        navParams.rightMargin = Ui.dp(context, 36);
+        textLayer.addView(navRow, navParams);
+
+        // 中间弹簧，把歌词压到底部
+        View spacer = new View(context);
+        textLayer.addView(spacer, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        lyricView = Ui.text(context, "", 13, 0xFFFFFFFF, true);
+        lyricView.setGravity(Gravity.CENTER);
+        lyricView.setBackground(Ui.rounded(0x88000000, Ui.dp(context, 8)));
+        lyricView.setPadding(Ui.dp(context, 8), Ui.dp(context, 4),
+                Ui.dp(context, 8), Ui.dp(context, 4));
+        textLayer.addView(lyricView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        frame.addView(textLayer, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
         TextView waiting = Ui.text(context, "副屏：等待盒子画面", 12, 0xCCFFFFFF, false);
         waiting.setGravity(Gravity.CENTER);
         FrameLayout.LayoutParams hintParams = new FrameLayout.LayoutParams(
@@ -263,6 +360,27 @@ final class SecondaryScreenOverlay implements H264SurfaceRenderer.Listener, Auto
         root = frame;
         renderer = surface;
         hint = waiting;
+        applyText();
+    }
+
+    /** 把缓存的文字状态刷到视图上；必须在主线程。 */
+    private void applyText() {
+        if (navRow == null || navIcon == null || navLine1 == null || navLine2 == null
+                || lyricView == null) {
+            return;
+        }
+        boolean showNav = navVisible && (!navPrimary.isEmpty() || !navSecondary.isEmpty());
+        navIcon.setManeuver(navManeuver);
+        navLine1.setText(navPrimary);
+        navLine1.setVisibility(navPrimary.isEmpty() ? View.GONE : View.VISIBLE);
+        navLine2.setText(navSecondary);
+        navLine2.setVisibility(navSecondary.isEmpty() ? View.GONE : View.VISIBLE);
+        navRow.setVisibility(showNav ? View.VISIBLE : View.GONE);
+        lyricView.setText(lyricLine);
+        lyricView.setVisibility(lyricLine.isEmpty() ? View.GONE : View.VISIBLE);
+        if (showNav || !lyricLine.isEmpty()) {
+            hideHint();
+        }
     }
 
     private void hideHint() {
@@ -419,6 +537,8 @@ final class SecondaryScreenOverlay implements H264SurfaceRenderer.Listener, Auto
             }
             screenWidth = metrics.widthPixels;
             screenHeight = metrics.heightPixels;
+            Log.i(TAG, "屏幕尺寸 " + screenWidth + "x" + screenHeight + "（density "
+                    + metrics.densityDpi + "）");
         } catch (RuntimeException exception) {
             Log.w(TAG, "读取屏幕尺寸失败", exception);
         }

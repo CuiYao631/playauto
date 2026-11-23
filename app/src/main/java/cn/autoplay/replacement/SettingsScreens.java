@@ -57,6 +57,7 @@ final class SettingsScreens {
     private TextView steeringLog;
     private LinearLayout steeringLogCard;
     private TextView navigationLog;
+    private TextView dashboardStatus;
     private TextView boxBluetoothName;
     private TextView boxWifiName;
     private final java.util.ArrayDeque<String> steeringLogLines = new java.util.ArrayDeque<>();
@@ -177,6 +178,11 @@ final class SettingsScreens {
         navigationRow("音频调试", this::audioDebugDialog);
         sliderRow("导航/提示音期间媒体音量", 100, "navigation_media_gain", 100, "%",
                 host::onNavigationGainChanged);
+
+        section("调试");
+        toggleRow("盒子指令日志窗口", BoxLogOverlay.PREF_ENABLED, false,
+                host::onBoxLogOverlayChanged, host::showBoxLogOverlayHelp);
+        navigationRow("清空盒子指令日志", host::clearBoxCommandLog);
 
         section("盒子配置（部分设置需重连手机）");
         boxBluetoothName = boxNameRow("蓝牙名称", true);
@@ -326,6 +332,12 @@ final class SettingsScreens {
                 13, Ui.TEXT_SECONDARY, false);
         help.setPadding(dp(8), dp(16), dp(8), dp(12));
         list.addView(help);
+        dashboardStatus = Ui.text(host, "", 14, Ui.TEXT, false);
+        dashboardStatus.setTypeface(android.graphics.Typeface.MONOSPACE);
+        dashboardStatus.setTextIsSelectable(true);
+        LinearLayout statusCard = Ui.card(host);
+        statusCard.addView(dashboardStatus);
+        list.addView(statusCard);
         navigationLog = Ui.text(host, "", 13, Ui.TEXT, false);
         navigationLog.setTypeface(android.graphics.Typeface.MONOSPACE);
         navigationLog.setTextIsSelectable(true);
@@ -408,6 +420,7 @@ final class SettingsScreens {
 
     void updateNavigationLog() {
         if (navigationLog != null) navigationLog.setText(host.navigationLogText());
+        if (dashboardStatus != null) dashboardStatus.setText(host.dashboardText());
     }
 
     View environmentPage() {

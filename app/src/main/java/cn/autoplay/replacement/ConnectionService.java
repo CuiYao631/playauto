@@ -43,6 +43,7 @@ public final class ConnectionService extends Service {
     interface Client {
         default void onNavigationLogChanged() { }
         default void onHostUiRequested() { }
+        default void onBoxCommandLogChanged() { }
         void onConnectionState();
         void onVideoFrame(VideoFrame frame);
         void onMicrophonePermissionNeeded();
@@ -65,6 +66,8 @@ public final class ConnectionService extends Service {
     private Client client;
     /** 用悬浮窗模拟的副屏，承载 CMD_DASHBOARD_FRAME(44)。 */
     private SecondaryScreenOverlay secondaryScreen;
+    /** 盒子指令日志悬浮窗（调试用），与副屏独立开关。 */
+    private BoxLogOverlay boxLogOverlay;
     private volatile boolean clientVisible;
     private boolean foreground;
     private boolean microphoneForeground;
@@ -180,6 +183,8 @@ public final class ConnectionService extends Service {
         } else {
             updateBackgroundPolicy();
         }
+        // 日志窗口只与设置开关有关，未连接时也要按上次状态恢复
+        updateBoxLogOverlay();
         // USB permission and the phone session must be re-established after process death.
         return START_NOT_STICKY;
     }
@@ -566,6 +571,11 @@ public final class ConnectionService extends Service {
     private void startProtocol() {
         Log.i(TAG, "初始化协议会话及盒子配置");
         int epoch = ++generation;
+        // 调试日志：分隔不同会话，并开始每秒汇总高频帧计数
+        handler.removeCallbacks(boxFrameFlush);
+        dashboardSubtypesSeen.clear();
+        appendBoxCommandLine(boxLogTime.format(new java.util.Date()) + "  —— 新会话 ——");
+        handler.postDelayed(boxFrameFlush, 1000);
         AudioPlayback sessionPlayback = playback;
         session = new BoxProtocolSession(connection, width, height,
                 VideoPreferences.frameRate(prefs()), new BoxProtocolSession.Listener() {
@@ -638,6 +648,8 @@ public final class ConnectionService extends Service {
                     wifiLinked = wifi;
                     if (!plugged) {
                         clearNavigationState("手机未连接，等待导航数据");
+                        mediaText.clear();
+                        pushDashboardText();
                         microphoneDecodeType = -1;
                         capturingDecodeType = -1;
                         capture.stop();
@@ -651,6 +663,9 @@ public final class ConnectionService extends Service {
             @Override public void onPairedDevices(
                     java.util.List<BoxProtocolSession.PairedDevice> devices) {
                 dispatch(epoch, ConnectionService.this::notifyClient);
+            }
+            @Override public void onBoxCommand(int command, int payloadLength, int value) {
+                recordBoxCommand(command, payloadLength, value);
             }
             @Override public void onFirmwareProgress(int percent) {
                 dispatch(epoch, () -> {
@@ -687,9 +702,23 @@ public final class ConnectionService extends Service {
             @Override public void onNavigationUpdate(org.json.JSONObject data) {
                 dispatch(epoch, () -> updateNavigationText(data));
             }
+            @Override public void onNavigationStarted() {
+                dispatch(epoch, () -> {
+                    navigationText.markStarted(System.currentTimeMillis());
+                    pushDashboardText();
+                });
+            }
+            @Override public void onMediaUpdate(org.json.JSONObject data) {
+                dispatch(epoch, () -> updateMediaText(data));
+            }
             @Override public void onNavigationEnded() {
                 dispatch(epoch, () -> {
-                    clearNavigationState("导航已结束");
+                    navigationText.markEnded(System.currentTimeMillis());
+                    pushDashboardText();
+                    // 防抖：3 秒内没有新的导航数据才真正清空，避免 2/0 交替导致闪烁
+                    handler.removeCallbacks(dashboardTextRefresh);
+                    handler.postDelayed(dashboardTextRefresh,
+                            NavigationText.CLEAR_DEBOUNCE_MS + 200);
                     if (client != null) client.onNavigationLogChanged();
                 });
             }
@@ -851,6 +880,8 @@ public final class ConnectionService extends Service {
             secondaryScreen.show();
             secondaryScreen.notifyLayout();
         }
+        // 窗口刚显示时把当前导航/歌词文字补上
+        pushDashboardText();
     }
 
     private void hideSecondaryScreen() {
@@ -921,6 +952,8 @@ public final class ConnectionService extends Service {
         current.setRebootAfterUpgrade(prefs.getBoolean("reboot_after_upgrade", true));
         // 副屏窗口与协议无关，连接建立后按开关恢复；尺寸变化会回调 naviScreenInfo。
         updateSecondaryScreen();
+        // 调试日志窗口同样按开关恢复，不依赖连接状态
+        updateBoxLogOverlay();
         List<BoxSetting> settings = new ArrayList<>();
         settings.add(BoxSetting.dashboardInfo());
         settings.add(BoxSetting.integer("drivePosition", 0));
@@ -1087,9 +1120,215 @@ public final class ConnectionService extends Service {
         Log.i(TAG, "诊断：" + message);
     }
 
-    /** 会话异常结束后按退避间隔自动重试，避免一直卡在「连接失败」。 */
-    private void scheduleReconnect() {
+    // ---- 盒子指令日志（调试窗口） ----
+
+    /** 日志保留条数，与导航日志一致量级，避免长时间运行吃内存。 */
+    private static final int MAX_BOX_COMMAND_LOG = 200;
+    /** 最新一条在最前。只在主线程读写。 */
+    private final java.util.ArrayDeque<String> boxCommandLog = new java.util.ArrayDeque<>();
+    /** 高频帧计数：视频 6 / 音频 7 / 副屏 44，每秒汇总一行。 */
+    private final java.util.concurrent.atomic.AtomicInteger videoFrameCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger audioFrameCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger dashboardFrameCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private final java.text.SimpleDateFormat boxLogTime =
+            new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.ROOT);
+    private final Runnable boxFrameFlush = this::flushBoxFrameCounts;
+    /** 本次会话收到的 cmd 42 子类型（去重，保持到达顺序）。只在主线程读写。 */
+    private final java.util.LinkedHashSet<Integer> dashboardSubtypesSeen =
+            new java.util.LinkedHashSet<>();
+
+    /**
+     * 记录一条盒子→主机命令。
+     *
+     * <p>在协议线程调用。视频/音频/副屏帧只累加计数，由
+     * {@link #flushBoxFrameCounts()} 每秒汇总成一行，避免日志刷屏。
+     */
+    private void recordBoxCommand(int command, int payloadLength, int value) {
+        switch (command) {
+            case 6:
+                videoFrameCount.incrementAndGet();
+                return;
+            case 7:
+                audioFrameCount.incrementAndGet();
+                return;
+            case 44:
+                dashboardFrameCount.incrementAndGet();
+                return;
+            default:
+                break;
+        }
+        // 时间格式化与环形缓冲都只在主线程做（SimpleDateFormat 非线程安全）
+        handler.post(() -> {
+            if (command == 42 && value >= 0) {
+                dashboardSubtypesSeen.add(value);
+                if (client != null) client.onNavigationLogChanged();
+            }
+            appendBoxCommandLine(formatBoxCommand(command, payloadLength, value));
+        });
+    }
+
+    /** 本次会话已收到的 cmd 42 子类型，用于诊断「只有歌词没有导航」。 */
+    String dashboardSubtypeSummary() {
+        if (dashboardSubtypesSeen.isEmpty()) {
+            return "尚未收到 CMD 42 数据";
+        }
+        StringBuilder text = new StringBuilder("已收到 CMD 42 子类型：");
+        boolean first = true;
+        for (Integer subtype : dashboardSubtypesSeen) {
+            if (!first) text.append("、");
+            first = false;
+            text.append(subtype).append('（').append(dashboardSubtypeName(subtype)).append('）');
+        }
+        if (!dashboardSubtypesSeen.contains(200)) {
+            text.append("\n没有 200（导航）：盒子只在手机处于真实路线引导、"
+                    + "且车机屏幕显示导航时才会下发");
+        }
+        return text.toString();
+    }
+
+    private static String dashboardSubtypeName(int subtype) {
+        switch (subtype) {
+            case 1: return "媒体/歌词";
+            case 2: return "封面";
+            case 3: return "封面";
+            case 100: return "来电";
+            case 200: return "导航";
+            case 202: return "原始";
+            case 203: return "原始";
+            default: return "未知";
+        }
+    }
+
+    private String formatBoxCommand(int command, int payloadLength, int value) {
+        String name = BoxProtocolSession.describeCommand(command);
+        StringBuilder line = new StringBuilder().append(boxLogTime.format(new java.util.Date()))
+                .append("  ").append(command);
+        if (name == null) {
+            line.append("  未知命令");
+        } else {
+            line.append("  ").append(name);
+        }
+        line.append("  ").append(payloadLength).append(" B");
+        if (value >= 0) line.append("  值=").append(value);
+        return line.toString();
+    }
+
+    /** 每秒把三类高频帧的计数写成一行；无计数时跳过。 */
+    private void flushBoxFrameCounts() {
         if (destroyed) return;
+        int video = videoFrameCount.getAndSet(0);
+        int audio = audioFrameCount.getAndSet(0);
+        int dashboard = dashboardFrameCount.getAndSet(0);
+        StringBuilder line = new StringBuilder();
+        if (video > 0) line.append("6 CMD_VIDEO_FRAME ×").append(video).append(" 帧");
+        if (audio > 0) {
+            if (line.length() > 0) line.append("；");
+            line.append("7 CMD_AUDIO_FRAME ×").append(audio).append(" 帧");
+        }
+        if (dashboard > 0) {
+            if (line.length() > 0) line.append("；");
+            line.append("44 CMD_DASHBOARD_FRAME ×").append(dashboard).append(" 帧");
+        }
+        if (line.length() > 0) {
+            String text = boxLogTime.format(new java.util.Date()) + "  " + line;
+            appendBoxCommandLine(text);
+        }
+        // 只在会话存活时继续排下一次汇总
+        if (!destroyed && session != null) handler.postDelayed(boxFrameFlush, 1000);
+    }
+
+    /** 追加一行并刷新日志窗口/界面。必须在主线程调用。 */
+    private void appendBoxCommandLine(String line) {
+        boxCommandLog.addFirst(line);
+        while (boxCommandLog.size() > MAX_BOX_COMMAND_LOG) boxCommandLog.removeLast();
+        BoxLogOverlay overlay = boxLogOverlay;
+        if (overlay != null && overlay.isShowing()) {
+            overlay.setText(boxCommandLogText());
+        }
+        if (client != null) client.onBoxCommandLogChanged();
+    }
+
+    /** 日志文本，最新在前；日志窗口和设置页共用。 */
+    String boxCommandLogText() {
+        if (boxCommandLog.isEmpty()) return "等待盒子上报指令…";
+        StringBuilder text = new StringBuilder();
+        for (String line : boxCommandLog) {
+            if (text.length() > 0) text.append('\n');
+            text.append(line);
+        }
+        return text.toString();
+    }
+
+    void clearBoxCommandLog() {
+        handler.post(() -> {
+            boxCommandLog.clear();
+            videoFrameCount.set(0);
+            audioFrameCount.set(0);
+            dashboardFrameCount.set(0);
+            BoxLogOverlay overlay = boxLogOverlay;
+            if (overlay != null && overlay.isShowing()) overlay.setText(boxCommandLogText());
+            if (client != null) client.onBoxCommandLogChanged();
+        });
+    }
+
+    // ---- 盒子指令日志悬浮窗 ----
+
+    private void updateBoxLogOverlay() {
+        if (destroyed) {
+            return;
+        }
+        if (!prefs().getBoolean(BoxLogOverlay.PREF_ENABLED, false)) {
+            hideBoxLogOverlay();
+            return;
+        }
+        if (!AndroidCompat.canDrawOverlays(this)) {
+            Log.w(TAG, "盒子指令日志已开启，但缺少「显示在其他应用上层」权限");
+            hideBoxLogOverlay();
+            return;
+        }
+        showBoxLogOverlay();
+    }
+
+    private void showBoxLogOverlay() {
+        if (destroyed) {
+            return;
+        }
+        if (boxLogOverlay == null) {
+            boxLogOverlay = new BoxLogOverlay(this, new BoxLogOverlay.WindowListener() {
+                @Override public void onCloseRequested() {
+                    prefs().edit().putBoolean(BoxLogOverlay.PREF_ENABLED, false).apply();
+                    hideBoxLogOverlay();
+                    notifyClient();
+                }
+
+                @Override public void onClearRequested() {
+                    clearBoxCommandLog();
+                }
+            });
+        }
+        if (!boxLogOverlay.isShowing()) {
+            boxLogOverlay.show();
+        }
+        boxLogOverlay.setText(boxCommandLogText());
+    }
+
+    private void hideBoxLogOverlay() {
+        BoxLogOverlay current = boxLogOverlay;
+        if (current != null && current.isShowing()) {
+            current.hide();
+        }
+    }
+
+    /** 设置页切换「盒子指令日志」开关后调用。 */
+    void refreshBoxLogOverlay() {
+        updateBoxLogOverlay();
+    }
+
+    /** 会话异常结束后按退避间隔自动重试，避免一直卡在「连接失败」。 */
+    private void scheduleReconnect() {        if (destroyed) return;
         if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
             Log.w(TAG, "自动重连已达上限，等待用户拔插盒子或重新打开应用");
             return;
@@ -1113,24 +1352,81 @@ public final class ConnectionService extends Service {
 
     private final java.util.ArrayDeque<String> navigationLog = new java.util.ArrayDeque<>();
     private final NavigationText navigationText = new NavigationText();
+    private final MediaText mediaText = new MediaText();
+    /** 导航结束后延迟刷新副屏文字（防抖）。 */
+    private final Runnable dashboardTextRefresh = this::pushDashboardText;
+    /** 上一次推送到副屏的文字摘要，只在变化时记日志。 */
+    private String lastDashboardTextLog = "";
 
     String navigationText() {
         return navigationText.text();
     }
 
+    /** 媒体/歌词文字，供设置页展示。 */
+    String mediaText() {
+        return mediaText.text();
+    }
+
+    /** 转向原始字段与解析结果，供设置页对照车机屏幕排查图标问题。 */
+    String maneuverDebugText() {
+        return navigationText.debugLine();
+    }
+
     private void clearNavigationState(String message) {
         navigationText.clear(message);
+        pushDashboardText();
     }
 
     private void updateNavigationText(org.json.JSONObject data) {
-        try {
-            navigationText.update(data);
-        } catch (org.json.JSONException exception) {
-            Log.e(TAG, "导航文字字段解析失败", exception);
-            recordNavigationData("导航文字字段解析失败：" + exception.getMessage());
-            return;
+        navigationText.update(data, System.currentTimeMillis());
+        pushDashboardText();
+        if (navigationText.endPending()) {
+            // 盒子进入结束态后再次刷新一次，让防抖后的清空真正生效
+            handler.removeCallbacks(dashboardTextRefresh);
+            handler.postDelayed(dashboardTextRefresh,
+                    NavigationText.CLEAR_DEBOUNCE_MS + 200);
         }
         if (client != null) client.onNavigationLogChanged();
+    }
+
+    private void updateMediaText(org.json.JSONObject data) {
+        mediaText.update(data);
+        pushDashboardText();
+        // 设置页的「仪表导航」也展示歌词，复用导航日志的刷新回调
+        if (client != null) client.onNavigationLogChanged();
+    }
+
+    /**
+     * 把当前导航/歌词文字推到副屏悬浮窗。
+     *
+     * <p>盒子自己会在 44 流里画 HUD，这里只做叠加；悬浮窗没开时直接跳过。
+     */
+    private void pushDashboardText() {
+        SecondaryScreenOverlay overlay = secondaryScreen;
+        if (overlay == null || !overlay.isShowing()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        boolean showNav = navigationText.shouldShow(now);
+        String primary = showNav ? navigationText.primaryLine() : "";
+        String secondary = showNav ? navigationText.secondaryLine() : "";
+        Maneuver maneuver = showNav ? navigationText.maneuver() : Maneuver.STRAIGHT;
+        String lyric = mediaText.lyricLine();
+        overlay.setDashboardText(primary, secondary, maneuver, showNav, lyric);
+        logDashboardText(primary, secondary, maneuver, showNav, lyric);
+    }
+
+    /** 副屏文字只在内容变化时记一条日志，便于不截图也能确认上屏内容。 */
+    private void logDashboardText(String primary, String secondary, Maneuver maneuver,
+            boolean showNav, String lyric) {
+        String snapshot = (showNav ? primary + " | " + secondary + " | 图标 "
+                + maneuver.label() : "<无导航>") + " ｜ 歌词："
+                + (lyric.isEmpty() ? "<无>" : lyric);
+        if (snapshot.equals(lastDashboardTextLog)) {
+            return;
+        }
+        lastDashboardTextLog = snapshot;
+        Log.i("AutoPlaySecondary", "副屏文字：" + snapshot);
     }
 
     String navigationLogText() {
@@ -1163,6 +1459,9 @@ public final class ConnectionService extends Service {
 
     private void closeConnection() {
         cancelReconnect();
+        handler.removeCallbacks(boxFrameFlush);
+        handler.removeCallbacks(dashboardTextRefresh);
+        mediaText.clear();
         clearNavigationState("盒子未连接，等待导航数据");
         generation++;
         BoxProtocolSession old = session;
@@ -1203,6 +1502,11 @@ public final class ConnectionService extends Service {
         secondaryScreen = null;
         if (overlay != null) {
             overlay.close();
+        }
+        BoxLogOverlay logOverlay = boxLogOverlay;
+        boxLogOverlay = null;
+        if (logOverlay != null) {
+            logOverlay.close();
         }
         capture.close();
         mediaSession.release();

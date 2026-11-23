@@ -91,6 +91,23 @@ public final class BoxProtocolSession implements AutoCloseable {
     // Short grace period so the box can reconnect a paired phone on its own first.
     private static final long AUTO_CONNECT_DELAY_MS = 2000L;
     /**
+     * 手机阶段转变时补发 {@code naviScreenInfo} 的最小间隔。
+     *
+     * <p>盒子拿不到副屏尺寸就不会下发 {@code CMD_DASHBOARD_FRAME}(44)；
+     * 5 秒内已经报过就不再重复，避免盒子反复上报同一阶段时刷帧。
+     */
+    private static final long NAVI_SCREEN_INFO_REFRESH_MS = 5000L;
+    /**
+     * 单次 bulk 写超时。原版固定用 4000 ms（{@code bulkTransfer(..., 4000)}）。
+     *
+     * <p>盒子在写 /etc 配置、重启 CarPlay 服务、固件升级期间会短暂停止读 USB，
+     * 1 秒的等待不足以覆盖这种停顿，会误报「USB bulk write timed out」并打断会话。
+     */
+    private static final int USB_WRITE_TIMEOUT_MS = 4000;
+    /** 汽车图标同步失败后最多重试一次（盒子忙时第二次通常就能成功）。 */
+    private static final int CAR_LOGO_UPLOAD_ATTEMPTS = 2;
+    private static final long CAR_LOGO_RETRY_DELAY_MS = 800L;
+    /**
      * 升级成功后等待多久再下发重启。留出时间让盒子把 187 状态与 177 进度发完，
      * 否则重启指令可能抢在成功回报之前把 USB 掐断。
      */
@@ -138,6 +155,16 @@ public final class BoxProtocolSession implements AutoCloseable {
         default void onNavigationData(String data) { }
         default void onNavigationUpdate(org.json.JSONObject data) { }
         default void onNavigationEnded() { }
+
+        /** 盒子通知导航开始（{@code CMD_CARPLAY_CMD 8 / 506}）。 */
+        default void onNavigationStarted() { }
+
+        /**
+         * 媒体/歌词增量包（{@code CMD_DASHBOARD_DATA 42} 子类型 {@code 1}）。
+         *
+         * <p>只包含发生变化的字段，接收方必须做字段级合并，详见 {@code MediaText}。
+         */
+        default void onMediaUpdate(org.json.JSONObject data) { }
         default void onHostUiRequested() { }
         void onStatus(String status);
 
@@ -174,6 +201,20 @@ public final class BoxProtocolSession implements AutoCloseable {
 
         /** 盒子固件升级状态，对应 CMD_UPDATE：1 开始、2 成功、3 失败、5/6/7 OTA。 */
         default void onFirmwareStatus(int status) {
+        }
+
+        /**
+         * 每收到一条盒子→主机的命令都会回调一次，用于「盒子指令日志」窗口。
+         *
+         * <p>高频帧（6 视频 / 7 音频 / 44 副屏）由调用方自行聚合计次，
+         * 协议层不做节流，避免漏掉关键控制命令。
+         *
+         * @param command       命令号
+         * @param payloadLength 负载字节数（不含 16 字节帧头）
+         * @param value         有意义的首个整数值（cmd 3 阶段 / cmd 8 子命令 /
+         *                      cmd 177、187 状态 / cmd 2 手机类型），无意义时为 {@code -1}
+         */
+        default void onBoxCommand(int command, int payloadLength, int value) {
         }
 
         /**
@@ -235,6 +276,21 @@ public final class BoxProtocolSession implements AutoCloseable {
     private boolean rebootRequested;
     /** 手动断开后的自动回连抑制截止时刻（{@link SystemClock#elapsedRealtime()}）。 */
     private volatile long autoConnectSuppressedUntil;
+    /**
+     * 最近一次要上报的副屏尺寸 {@code {width, height, fps, dpi}}。
+     *
+     * <p>悬浮窗在 USB 握手之前就已创建，此时 {@code protocolReady} 为 false，
+     * 直接丢弃会让盒子永远收不到 {@code naviScreenInfo}，也就不会下发
+     * {@code CMD_DASHBOARD_FRAME}(44)，悬浮窗只能停在「等待盒子画面」。
+     */
+    private volatile int[] pendingNaviScreenInfo;
+    /** 上次成功写入副屏尺寸的时间，用于阶段转变时的补发限速。 */
+    private volatile long lastNaviScreenInfoSentAt;
+    /** 是否已经收到过副屏画面（只用于首帧日志，避免每帧刷 logcat）。 */
+    private volatile boolean dashboardFrameSeen;
+    /** 各类 cmd 42 子类型的上次日志时间（只用于日志限速）。 */
+    private final java.util.HashMap<Integer, Long> dashboardSubtypeLogAt =
+            new java.util.HashMap<>();
     private volatile String boxUuid = "";
     private volatile String boxManufacturer = "";
     private volatile String boxProductType = "";
@@ -346,6 +402,8 @@ public final class BoxProtocolSession implements AutoCloseable {
         sendMicSource();
         sendNightMode();
         sendBoxSettings();
+        // 握手前创建的副屏窗口尺寸在这时补发，盒子据此才会启动副屏视频流
+        flushNaviScreenInfo();
     }
 
     void setBoxSettings(List<BoxSetting> settings) {
@@ -518,6 +576,11 @@ public final class BoxProtocolSession implements AutoCloseable {
                     }
                     sendOpen(cryptEnabled, boxVersionCode);
                     continue;
+                }
+
+                if (listener != null) {
+                    listener.onBoxCommand(packet.command, packet.payload.length,
+                            commandValue(packet.command, packet.payload));
                 }
 
                 if (packet.command == CMD_ENABLE_CRYPT) {
@@ -1037,6 +1100,8 @@ public final class BoxProtocolSession implements AutoCloseable {
         publishLinkState();
         publishPhoneStatus("已检测到 " + phoneTypeName(phoneType)
                 + (wifiFlag ? "，Wi-Fi 已连接" : "，等待连接"));
+        // 新一轮手机会话开始时再报一次副屏尺寸，避免盒子重启 CarPlay 服务后丢失配置
+        flushNaviScreenInfo();
     }
 
     private void handleAudioPacket(byte[] payload) throws IOException {
@@ -1089,6 +1154,7 @@ public final class BoxProtocolSession implements AutoCloseable {
                 // 手机已经连上，手动断开的抑制窗口不再需要
                 autoConnectSuppressedUntil = 0;
                 publishPhoneStatus(phoneTypeName(phoneType) + " 工作中");
+                resendNaviScreenInfoIfStale();
                 break;
             case 4:
                 phoneWorking = false;
@@ -1105,6 +1171,8 @@ public final class BoxProtocolSession implements AutoCloseable {
                 phoneWorking = true;
                 autoConnectSuppressedUntil = 0;
                 publishPhoneStatus(phoneTypeName(phoneType) + " 已连接并工作");
+                // 盒子通常在这一阶段才真正建立 CarPlay 会话，此时补一次副屏尺寸
+                resendNaviScreenInfoIfStale();
                 break;
             case 11:
                 publishPhoneStatus("手机正在唤醒");
@@ -1139,6 +1207,11 @@ public final class BoxProtocolSession implements AutoCloseable {
         }
         try {
             VideoFrame frame = VideoFrame.parseDashboard(payload);
+            if (!dashboardFrameSeen) {
+                dashboardFrameSeen = true;
+                Log.i(TAG, "收到首帧副屏画面 " + frame.getWidth() + "x" + frame.getHeight()
+                        + "，" + frame.getH264Data().length + " 字节");
+            }
             if (listener != null) {
                 listener.onDashboardFrame(frame);
             }
@@ -1154,12 +1227,80 @@ public final class BoxProtocolSession implements AutoCloseable {
      * playAuto 用悬浮窗模拟，因此改为上报悬浮窗的像素尺寸与 DPI。
      */
     public void sendNaviScreenInfo(int widthPx, int heightPx, int fps, int dpi) {
-        if (!protocolReady || closed || widthPx <= 0 || heightPx <= 0) {
+        if (closed || widthPx <= 0 || heightPx <= 0) {
             return;
         }
-        byte[] payload = BoxSetting.naviScreenInfo(widthPx, heightPx, fps, dpi).payload();
+        // 悬浮窗通常早于协议握手创建，未就绪时先记住尺寸，等 applyRuntimeConfig() 补发。
+        pendingNaviScreenInfo = new int[]{widthPx, heightPx, fps, dpi};
+        if (!protocolReady) {
+            return;
+        }
+        writeNaviScreenInfo(pendingNaviScreenInfo);
+    }
+
+    /**
+     * 重新下发缓存的副屏尺寸。
+     *
+     * <p>握手完成、手机重新插入（盒子会新起一轮 CarPlay 会话）时各发一次，
+     * 保证盒子始终持有当前悬浮窗的尺寸。
+     */
+    private void flushNaviScreenInfo() {
+        int[] info = pendingNaviScreenInfo;
+        if (info == null || !protocolReady || closed) {
+            return;
+        }
+        writeNaviScreenInfo(info);
+    }
+
+    private void writeNaviScreenInfo(int[] info) {
+        byte[] payload = BoxSetting.naviScreenInfo(info[0], info[1], info[2], info[3])
+                .payload();
+        lastNaviScreenInfoSentAt = SystemClock.elapsedRealtime();
+        Log.i(TAG, "上报副屏尺寸 " + info[0] + "x" + info[1] + " @" + info[2]
+                + " fps, " + info[3] + " dpi");
         runOnControlExecutor(() -> writeFrame(
                 ProtocolFrame.encode(25, payload, cryptEnabled, nonce)));
+    }
+
+    /**
+     * 手机刚进入工作态时，若副屏尺寸已超过 {@link #NAVI_SCREEN_INFO_REFRESH_MS} 没上报，再发一次。
+     *
+     * <p>盒子在收到副屏尺寸前不会产生 {@code CMD_DASHBOARD_FRAME}(44)，而
+     * 握手完成到手机真正投屏之间盒子可能重启 CarPlay 服务，所以阶段转变时
+     * 补报一次比只报一次更可靠；用时间戳限速避免盒子反复上报同阶段时刷帧。
+     */
+    private void resendNaviScreenInfoIfStale() {
+        int[] info = pendingNaviScreenInfo;
+        if (info == null || !protocolReady || closed) {
+            return;
+        }
+        if (SystemClock.elapsedRealtime() - lastNaviScreenInfoSentAt
+                < NAVI_SCREEN_INFO_REFRESH_MS) {
+            return;
+        }
+        writeNaviScreenInfo(info);
+    }
+
+    /**
+     * 记录 {@code CMD 42} 的子类型与内容摘要，供排查「只有歌词没有导航」。
+     *
+     * <p>导航（200）与来电（100）低频且关键，每次都记；媒体（1）约 0.5 s 一条，
+     * 只每 5 秒记一次，避免刷屏。
+     */
+    private void logDashboardSubtype(int subtype, int length, String data) {
+        long now = SystemClock.elapsedRealtime();
+        Long last = dashboardSubtypeLogAt.get(subtype);
+        boolean key = subtype == 200 || subtype == 100;
+        if (!key && last != null && now - last < 5000L) {
+            return;
+        }
+        dashboardSubtypeLogAt.put(subtype, now);
+        // 2/3 = 专辑封面 JPEG，202/203 = 原始数据，内容是二进制，不打印
+        boolean binary = subtype == 2 || subtype == 3 || subtype == 202 || subtype == 203;
+        String preview = binary ? "<二进制>"
+                : data.length() > 300 ? data.substring(0, 300) + "…" : data;
+        Log.i("AutoPlayNavigation", "CMD 42 子类型 " + subtype + "，"
+                + length + " 字节：" + preview);
     }
 
     private void handleDashboardData(byte[] payload) {
@@ -1169,19 +1310,42 @@ public final class BoxProtocolSession implements AutoCloseable {
             return;
         }
         int subtype = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt();
-        if (subtype != 200) {
-            if (listener != null) listener.onNavigationData("收到 CMD 42 / " + subtype
-                    + "，载荷 " + payload.length + " 字节（非导航 JSON 子类型，不记录内容）");
-            return;
-        }
+        // 子类型 1 / 100 / 200 的 JSON 末尾带 \0，先裁掉再解析
         int end = payload.length;
         while (end > 4 && payload[end - 1] == 0) end--;
+        if (end <= 4) {
+            if (listener != null) {
+                listener.onNavigationData("收到 CMD 42 / " + subtype + "，但负载为空");
+            }
+            return;
+        }
+        String data = new String(payload, 4, end - 4, java.nio.charset.StandardCharsets.UTF_8);
+        logDashboardSubtype(subtype, payload.length, data);
+
+        if (subtype == 1) {
+            // 媒体信息（歌名/歌手/歌词/进度），增量包
+            try {
+                org.json.JSONObject media = new org.json.JSONObject(data);
+                if (listener != null) listener.onMediaUpdate(media);
+            } catch (org.json.JSONException exception) {
+                android.util.Log.e("AutoPlayNavigation", "Invalid media JSON", exception);
+                if (listener != null) {
+                    listener.onNavigationData("媒体 JSON 解析失败：" + exception.getMessage()
+                            + "\n原始数据：" + data);
+                }
+            }
+            return;
+        }
+        if (subtype != 200) {
+            if (listener != null) listener.onNavigationData("收到 CMD 42 / " + subtype
+                    + "，载荷 " + payload.length + " 字节（媒体封面/来电或未使用子类型，不记录内容）");
+            return;
+        }
         if (end - 4 > 16384) {
             android.util.Log.e("AutoPlayNavigation", "Navigation payload exceeds 16 KiB");
             if (listener != null) listener.onNavigationData("数据错误：导航 JSON 超过 16 KiB，未保存");
             return;
         }
-        String data = new String(payload, 4, end - 4, java.nio.charset.StandardCharsets.UTF_8);
         try {
             org.json.JSONObject navigation = new org.json.JSONObject(data);
             if (listener != null) listener.onNavigationUpdate(navigation);
@@ -1213,6 +1377,7 @@ public final class BoxProtocolSession implements AutoCloseable {
             android.util.Log.i("AutoPlay", "CarPlay_RequestHostUI");
             if (listener != null) listener.onHostUiRequested();
         } else if (subcommand == 506 || subcommand == 507) {
+            if (subcommand == 506 && listener != null) listener.onNavigationStarted();
             if (subcommand == 507 && listener != null) listener.onNavigationEnded();
             if (listener != null) listener.onNavigationData("CMD 8 / " + subcommand
                     + (subcommand == 506 ? "：盒子通知导航开始" : "：盒子通知导航结束")
@@ -1499,6 +1664,64 @@ public final class BoxProtocolSession implements AutoCloseable {
         autoConnectThread.start();
     }
 
+    /**
+     * 取命令中有意义的首个整数值，供指令日志显示（阶段 / 子命令 / 状态 / 手机类型）。
+     *
+     * @return 无意义的命令或负载不足 4 字节时返回 {@code -1}
+     */
+    static int commandValue(int command, byte[] payload) {
+        if (payload == null || payload.length < 4) {
+            return -1;
+        }
+        switch (command) {
+            case CMD_PLUG:
+            case CMD_PHASE:
+            case CMD_CARPLAY:
+            case CMD_UPDATE_PROGRESS:
+            case CMD_UPDATE:
+            case 42:
+                // cmd 42 的首个 int 是子类型（1 媒体 / 200 导航 / 100 来电 …）
+                return ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt(0);
+            default:
+                return -1;
+        }
+    }
+
+    /** 命令号 → 协议名，用于「盒子指令日志」窗口；未知命令返回 {@code null}。 */
+    static String describeCommand(int command) {
+        switch (command) {
+            case 1: return "CMD_OPEN";
+            case CMD_PLUG: return "CMD_PLUG";
+            case CMD_PHASE: return "CMD_PHASE";
+            case 4: return "CMD_PLUGOUT";
+            case CMD_VIDEO_FRAME: return "CMD_VIDEO_FRAME";
+            case 7: return "CMD_AUDIO_FRAME";
+            case CMD_CARPLAY: return "CMD_CARPLAY_CMD";
+            case 11: return "CMD_CARPLAY_MODE_CHANGE";
+            case 13: return "CMD_BOX_BLUETOOTH_NAME";
+            case 14: return "CMD_BOX_WIFI_NAME";
+            case CMD_BLUETOOTH_PAIR_LIST: return "CMD_BLUETOOTH_PAIR_LIST";
+            case 19: return "CMD_BLUETOOTH_ONLINE_LIST";
+            case 22: return "CMD_CAMERA_INFO";
+            case 24: return "CMD_HICAR_URL";
+            case CMD_BOX_INFO: return "CMD_BOX_INFO";
+            case 42: return "CMD_DASHBOARD_DATA";
+            case 43: return "CMD_CONNECTION_PIN_CODE";
+            case CMD_DASHBOARD_FRAME: return "CMD_DASHBOARD_FRAME";
+            case 119: return "CMD_APP_RESET";
+            case 136: return "CMD_DEBUG_TEST";
+            case CMD_UPLOAD_FILE: return "CMD_FILE";
+            case 161: return "CMD_APP_LOG_GET";
+            case 163: return "CMD_CRYPT_BOX_INFO";
+            case CMD_UPDATE_PROGRESS: return "CMD_UPDATE_PROGRESS";
+            case CMD_UPDATE: return "CMD_UPDATE";
+            case 204: return "CMD_BOX_SOFTWARE_VERSION";
+            case CMD_ENABLE_CRYPT: return "CMD_ENABLE_CRYPT";
+            case 255: return "（忽略）";
+            default: return null;
+        }
+    }
+
     private static String phoneTypeName(int type) {
         switch (type) {
             case 1:
@@ -1582,12 +1805,14 @@ public final class BoxProtocolSession implements AutoCloseable {
 
     private void writeSegment(byte[] data, int start, int length) throws IOException {
         int offset = 0;
-        long deadline = SystemClock.elapsedRealtime() + 5000;
+        // 每次尝试都给足原版同款的 4 秒；整体再多留一次重试的余量。
+        long deadline = SystemClock.elapsedRealtime() + (long) USB_WRITE_TIMEOUT_MS * 2;
         while (offset < length && !closed) {
-            int count = connection.bulkWrite(data, start + offset, length - offset, 1000);
+            int count = connection.bulkWrite(data, start + offset, length - offset,
+                    USB_WRITE_TIMEOUT_MS);
             if (count <= 0) {
                 if (SystemClock.elapsedRealtime() >= deadline) {
-                    throw new IOException("USB bulk write timed out");
+                    throw new IOException("USB bulk write timed out（盒子可能正忙）");
                 }
                 continue;
             }

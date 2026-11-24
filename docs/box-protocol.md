@@ -555,6 +555,38 @@ sequenceDiagram
 逐条记录。窗口只在本次运行期间保留，`×` 关闭会同时关掉设置开关，`清空` 丢弃
 已记录内容。
 
+### 16.3 大灯模拟悬浮窗（测试夜间模式联动）
+
+「夜间模式 - 大灯联动」依赖车机的 `com.chinatsp.mcumanager.McuManager` 读取大灯状态。
+普通手机/模拟器上没有该服务，`HeadlightNightMode.start()` 会抛
+`ClassNotFoundException` 后放弃，**联动因此无法测试**。
+
+`HeadlightTestOverlay` 用悬浮窗提供「大灯开 / 大灯关」两个按钮，调用
+`HeadlightNightMode.simulate(int)` 伪造状态。它绕过 MCU 监听，但后续链路与真实大灯
+完全一致：
+
+```
+按钮 → simulate(1|0) → nightSetting → changed.run()
+     → ConnectionService.onHeadlightChanged()
+     → （夜间模式 = 大灯联动 时）session.setNightMode()
+     → cmd 8 / 16（夜间）或 cmd 8 / 17（白天）+ 写 /tmp/night_mode
+```
+
+开启方式：设置 → 更多设置 → 调试 → 「大灯模拟悬浮窗」（需要悬浮窗权限）。
+窗口会显示当前大灯状态、夜间模式是否为「大灯联动」、盒子是否已连接、MCU 是否可用。
+
+用 adb 验证整条链路：
+
+```bash
+adb logcat -s AutoPlayConnection AutoPlayProtocol
+# 点「大灯开」→ 模拟大灯=开，夜间模式=大灯联动，已注入=true
+#               下发夜间模式=1（cmd 8 / 16）
+# 点「大灯关」→ 模拟大灯=关，夜间模式=大灯联动，已注入=true
+#               下发夜间模式=0（cmd 8 / 17）
+```
+
+状态没变化时再按一次也会重新下发，便于排查「下发了但盒子没反应」。
+
 ### 固件升级链路（已打通）
 
 ```mermaid

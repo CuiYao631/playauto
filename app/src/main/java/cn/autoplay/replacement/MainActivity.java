@@ -969,6 +969,32 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    void onHeadlightTestOverlayChanged(boolean enabled) {
+        if (enabled && !AndroidCompat.canDrawOverlays(this)) {
+            Toast.makeText(this, "大灯模拟窗口需要「显示在其他应用上层」权限，请先授权",
+                    Toast.LENGTH_LONG).show();
+            openOverlayPermission();
+        }
+        ConnectionService service = connectionService;
+        if (service != null) service.refreshHeadlightTestOverlay();
+    }
+
+    void showHeadlightTestOverlayHelp() {
+        new AlertDialog.Builder(this)
+                .setTitle("大灯模拟悬浮窗")
+                .setMessage("「夜间模式 - 大灯联动」依赖车机的 McuManager 服务读取大灯状态，"
+                        + "普通手机上没有该服务，无法测试。"
+                        + "\n\n打开本开关后会出现一个悬浮窗，点「大灯开 / 大灯关」伪造大灯状态，"
+                        + "后续「回调 → 下发盒子 cmd 8/16（夜间）或 cmd 8/17（白天）→ "
+                        + "CarPlay 昼夜切换」与真实大灯完全一致。"
+                        + "\n\n使用前提：设置 → 夜间模式选「大灯联动」，且盒子已连接。"
+                        + "悬浮窗会显示当前条件是否满足。"
+                        + "\n\n拖动标题栏可移动；「×」关闭窗口并同时关闭本开关。"
+                        + "需要「显示在其他应用上层」权限。")
+                .setPositiveButton("知道了", null)
+                .show();
+    }
+
     void clearBoxCommandLog() {
         ConnectionService service = connectionService;
         if (service == null) {

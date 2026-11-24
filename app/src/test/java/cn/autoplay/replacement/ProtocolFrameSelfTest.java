@@ -81,6 +81,23 @@ public final class ProtocolFrameSelfTest {
         check(Maneuver.fromOrderTypeNew(12345, -1) == Maneuver.UNKNOWN, "表外取值");
         check(Maneuver.fromOrderTypeNew(-1, -1) == Maneuver.UNKNOWN, "no data is unknown");
 
+        // 大灯模拟：与真实大灯共用同一条回调链路，必须能在纯 JVM 下验证
+        final int[] fired = {0};
+        HeadlightNightMode headlight = new HeadlightNightMode(null, () -> fired[0]++);
+        check(headlight.currentSetting() == -1, "headlight starts unknown");
+        check(headlight.simulate(0), "simulate accepts 0");
+        check(headlight.currentSetting() == 0, "simulate sets close");
+        check(fired[0] == 1, "simulate fires callback once");
+        check(headlight.simulate(1), "simulate accepts 1");
+        check(headlight.currentSetting() == 1, "simulate sets open");
+        check(fired[0] == 2, "simulate fires callback again on change");
+        check(headlight.simulate(1), "simulate accepts repeat");
+        check(fired[0] == 3, "repeat still fires so resend works");
+        check(!headlight.simulate(2), "simulate rejects invalid value");
+        check(headlight.currentSetting() == 1, "invalid value keeps state");
+        check(!headlight.mcuAvailable(), "no MCU in test environment");
+        check(HeadlightNightMode.settingForStatus(null, 1) == 1, "null status keeps state");
+
         MediaText media = new MediaText();
         check(!media.hasContent(), "fresh media state has no content");
         check(media.lyricLine().isEmpty(), "fresh media has no lyric line");

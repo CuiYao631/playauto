@@ -5,6 +5,8 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 
 public final class ProtocolFrameSelfTest {
     public static void main(String[] args) throws Exception {
@@ -32,6 +34,149 @@ public final class ProtocolFrameSelfTest {
         testUpdateComparison();
         testBoxCommandNaming();
         testDashboardTextFormatting();
+        testClusterNaviProtocol();
+        testClusterNaviIcons();
+    }
+
+    private static void testClusterNaviProtocol() {
+        // 规范 §10.1 第 1 条：start() → STANDARD / KEY_TYPE=10019 / EXTRA_STATE=8 / 2 个字段
+        ClusterNavi navi = new ClusterNavi();
+        List<ClusterNavi.Message> start = navi.start();
+        check(start.size() == 1, "start produces one message");
+        ClusterNavi.Message stateMessage = start.get(0);
+        check(ClusterNavi.ACT_STANDARD.equals(stateMessage.action), "start uses STANDARD action");
+        check(Integer.valueOf(ClusterNavi.KEY_TYPE_STATE).equals(stateMessage.extras.get("KEY_TYPE")),
+                "start KEY_TYPE=10019");
+        check(Integer.valueOf(ClusterNavi.EXTRA_STATE_START).equals(
+                stateMessage.extras.get("EXTRA_STATE")), "start EXTRA_STATE=8");
+        check(stateMessage.extras.size() == 2, "start has exactly two extras");
+        check(navi.isActive(), "start enters ACTIVE");
+
+        // 重复 start 不应重复发送
+        check(navi.start().isEmpty(), "second start is ignored");
+
+        // 规范 §10.1 第 2 条：update(27,300) → UPDATE action / int 27 / String "300,m"
+        List<ClusterNavi.Message> turn = navi.turn(27, 300);
+        check(turn.size() == 1, "turn produces one message");
+        ClusterNavi.Message turnMessage = turn.get(0);
+        check(ClusterNavi.ACT_UPDATE.equals(turnMessage.action), "turn uses UPDATE action");
+        check(turnMessage.hasInt("navigation_id"), "navigation_id must be a primitive int");
+        check(Integer.valueOf(27).equals(turnMessage.extras.get("navigation_id")),
+                "navigation_id is 27");
+        check("300,m".equals(turnMessage.extras.get("navigation_dis")),
+                "navigation_dis is \"300,m\" string");
+
+        // 规范 §10.1 第 3 条：边界 65534 / 1 通过；0 / 65535 / -1 抛异常
+        check(navi.turn(22, 65534).size() == 1, "65534 meters accepted");
+        check(navi.turn(17, 1).size() == 1, "1 meter accepted");
+        for (int invalid : new int[]{0, 65535, -1}) {
+            final int distance = invalid;
+            expectIllegalArgument(() -> navi.turn(27, distance));
+        }
+        // 不允许扫未知 ID（规范 §6.4）
+        expectIllegalArgument(() -> navi.turn(1234, 300));
+        expectIllegalArgument(() -> navi.turn(-5, 300));
+
+        // 规范 §10.1 第 4 条：flush() → KEY_TYPE=10001，8 个字段，剩余时间为秒
+        List<ClusterNavi.Message> flush = navi.flush(5000, 600, "10 min", 6000, "当前路", "下一路");
+        check(flush.size() == 1, "flush produces one message");
+        Map<String, Object> summary = flush.get(0).extras;
+        check(ClusterNavi.ACT_STANDARD.equals(flush.get(0).action), "flush uses STANDARD action");
+        check(Integer.valueOf(ClusterNavi.KEY_TYPE_SUMMARY).equals(summary.get("KEY_TYPE")),
+                "flush KEY_TYPE=10001");
+        check(Integer.valueOf(5000).equals(summary.get("ROUTE_REMAIN_DIS")), "remain distance meters");
+        check(Integer.valueOf(600).equals(summary.get("ROUTE_REMAIN_TIME")), "remain time in seconds");
+        check("10 min".equals(summary.get("ROUTE_REMAIN_TIME_STRING")), "remain text");
+        check(Integer.valueOf(6000).equals(summary.get("ROUTE_ALL_DIS")), "total distance meters");
+        check("当前路".equals(summary.get("CUR_ROAD_NAME")), "current road");
+        check("下一路".equals(summary.get("NEXT_ROAD_NAME")), "next road");
+        check(Integer.valueOf(0).equals(summary.get("LIMITED_SPEED")), "limited speed defaults 0");
+        check(Integer.valueOf(0).equals(summary.get("ROAD_TYPE")), "road type defaults 0");
+        check(summary.size() == 9, "flush carries KEY_TYPE plus eight fields");
+        // 负数不得下发（规范 §5.3 禁止传负数）
+        Map<String, Object> clamped = navi.flush(-1, -1, null, -1, null, null).get(0).extras;
+        check(Integer.valueOf(0).equals(clamped.get("ROUTE_REMAIN_DIS")), "negative distance clamped");
+        check(Integer.valueOf(0).equals(clamped.get("ROUTE_REMAIN_TIME")), "negative time clamped");
+        check("".equals(clamped.get("CUR_ROAD_NAME")), "null road becomes empty string");
+
+        // 规范 §10.1 第 5 条：stop() 恰好两条，第一条 STOPPED 且无参数
+        List<ClusterNavi.Message> stop = navi.stop();
+        check(stop.size() == 2, "stop produces exactly two messages");
+        check(ClusterNavi.ACT_STOPPED.equals(stop.get(0).action),
+                "stop first clears turn codes via NAVIGATION_STOPPED");
+        check(stop.get(0).extras.isEmpty(), "NAVIGATION_STOPPED carries no extras");
+        check(ClusterNavi.ACT_STANDARD.equals(stop.get(1).action), "stop second is STANDARD");
+        check(Integer.valueOf(ClusterNavi.EXTRA_STATE_END).equals(
+                stop.get(1).extras.get("EXTRA_STATE")), "stop EXTRA_STATE=9");
+        check(!navi.isActive(), "stop leaves IDLE");
+        // 规范 §8.2：重复 stop 幂等，不再产生广播
+        check(navi.stop().isEmpty(), "repeated stop is idempotent");
+
+        // 规范 §10.1 第 6 条：未 start 就 update 不产生任何广播
+        ClusterNavi idle = new ClusterNavi();
+        check(idle.turn(27, 300).isEmpty(), "turn before start produces nothing");
+        check(idle.flush(1, 1, "", 1, "", "").isEmpty(), "flush before start produces nothing");
+        check(idle.stop().isEmpty(), "stop before start produces nothing");
+        // 规范 §8.2：stop 之后继续 update 被忽略
+        ClusterNavi cycle = new ClusterNavi();
+        cycle.start();
+        cycle.stop();
+        check(cycle.turn(27, 300).isEmpty(), "turn after stop is ignored");
+        cycle.start();
+        check(cycle.turn(27, 300).size() == 1, "restart re-enables updates");
+
+        // 规范 §10.1 第 7 条：UTF-8 按字符边界截断
+        check(ClusterNavi.utf8Clamped("中", 3).length == 3, "utf8 capacity respected");
+        check(ClusterNavi.utf8Clamped("中", 3)[0] == (byte) 0xE4, "utf8 first byte kept");
+        byte[] twoInThree = ClusterNavi.utf8Clamped("中文", 3);
+        check(twoInThree.length == 3, "utf8 output length equals capacity");
+        check(twoInThree[0] == (byte) 0xE4 && twoInThree[1] == (byte) 0xB8
+                && twoInThree[2] == (byte) 0xAD, "utf8 keeps one whole char, no half char");
+        check(ClusterNavi.utf8Clamped("中文", 6).length == 6, "fits two chars in six bytes");
+        check(ClusterNavi.utf8Clamped(null, 4)[0] == 0, "null becomes zero padding");
+        check(ClusterNavi.utf8Clamped("ab", 4)[3] == 0, "short text zero padded");
+
+        // combine 用于 ②③ 成对发送
+        ClusterNavi paired = new ClusterNavi();
+        paired.start();
+        List<ClusterNavi.Message> both = ClusterNavi.combine(
+                paired.turn(27, 300), paired.flush(5000, 600, "10 min", 6000, "A", "B"));
+        check(both.size() == 2, "combine keeps turn then flush order");
+        check(ClusterNavi.ACT_UPDATE.equals(both.get(0).action), "combine turn first");
+        check(ClusterNavi.ACT_STANDARD.equals(both.get(1).action), "combine flush second");
+    }
+
+    private static void testClusterNaviIcons() {
+        // 规范 §10.1 第 8 条：47 项且 ID 唯一
+        check(ClusterNaviIcons.ALL.size() == 47, "icon catalog has 47 entries");
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        for (ClusterNaviIcons.Icon icon : ClusterNaviIcons.ALL) {
+            check(seen.add(icon.id), "duplicate icon id: " + icon.id);
+        }
+        // 三个最高频 ID 的转向码必须逐字一致
+        check(ClusterNaviIcons.find(27).steer1 == 0x13, "left turn steer1 0x13");
+        check(ClusterNaviIcons.find(22).steer1 == 0x14, "right turn steer1 0x14");
+        check(ClusterNaviIcons.find(17).steer1 == 0x10, "straight steer1 0x10");
+        check(ClusterNaviIcons.find(0).steer1 == 0x00, "id 0 clears steer codes");
+        check(ClusterNaviIcons.find(23).steer1 == 0x16, "23 is right-rear, not left turn");
+        check(ClusterNaviIcons.find(26).steer1 == 0x15, "26 is left-rear");
+        check(ClusterNaviIcons.find(24).steer1 == 0x18, "24 right u-turn");
+        check(ClusterNaviIcons.find(25).steer1 == 0x17, "25 left u-turn");
+        check(ClusterNaviIcons.find(235).steer1 == 0x2A, "first roundabout exit 0x2A");
+        check(ClusterNaviIcons.find(271).steer1 == 0x33, "tenth roundabout exit 0x33");
+        // 0xFF 是真实映射输出，不是清除指令
+        check(ClusterNaviIcons.find(330).steer1 == 0xFF, "330 steer1 is 0xFF by design");
+        check(ClusterNaviIcons.find(331).steer2 == 0x04, "331 steer2 is 4 after branch fallthrough");
+        check(ClusterNaviIcons.find(332).steer1 == 0x10, "332 steer1 0x10");
+        check(ClusterNaviIcons.find(333).steer2 == 0x0F, "333 steer2 0x0F");
+        // 未知 ID 必须返回 null，禁止编造
+        check(ClusterNaviIcons.find(1234) == null, "unknown id returns null");
+        check(ClusterNaviIcons.find(-1) == null, "negative id returns null");
+        // 扩展项必须标注为实验性
+        check(ClusterNaviIcons.find(27).experimental == false, "basic icons are verified");
+        check(ClusterNaviIcons.find(327).experimental, "extended icons marked experimental");
+        check(ClusterNaviIcons.describe(ClusterNaviIcons.find(27)).contains("左转"),
+                "describe includes label");
     }
 
     private static void testDashboardTextFormatting() {

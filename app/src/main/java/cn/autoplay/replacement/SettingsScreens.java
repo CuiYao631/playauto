@@ -23,6 +23,11 @@ import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 /** Settings pages: application settings, more settings and the environment check. */
 final class SettingsScreens {
     static final class CheckResult {
@@ -67,6 +72,15 @@ final class SettingsScreens {
     private Widgets.LinkIcon wifiStatusIcon;
     private TextView advancedRootStatus;
     private TextView advancedUsbStatus;
+
+    /** 仪表导航调试的协议状态机；随 SettingsScreens 存活，跨页面重建保留。 */
+    private final ClusterNavi clusterNavi = new ClusterNavi();
+    /** 当前选中的仪表图标 ID，默认左转（规范 §6.1，已实车验证）。 */
+    private int clusterNaviIconId = 27;
+    private TextView clusterNaviStatus;
+    private TextView clusterNaviIconValue;
+    private TextView clusterNaviStateLabel;
+    private EditText clusterNaviDistance;
 
     private final java.util.ArrayList<Runnable> voiceStatusRefreshers = new java.util.ArrayList<>();
 
@@ -123,6 +137,7 @@ final class SettingsScreens {
                 host::onSecondaryScreenChanged, host::showSecondaryScreenHelp);
         segmentedRow("副屏大小", new String[]{"小", "中", "大"},
                 SecondaryScreenOverlay.PREF_SCALE, 1, host::onSecondaryScreenScaleChanged);
+        navigationRow("仪表导航调试", host::showNavigationLog);
 
         section("个性化");
         carLogoRow();
@@ -324,9 +339,10 @@ final class SettingsScreens {
     }
 
     View navigationPage() {
-        LinearLayout page = newPage("仪表导航（开发中）", "清空日志",
+        LinearLayout page = newPage("仪表导航", "清空日志",
                 host::clearNavigationLog, host::showSettings);
-        TextView help = Ui.text(host, "接收并记录盒子上报的导航 JSON，不自动向原车仪表发送广播。"
+        TextView help = Ui.text(host, "上半部分接收并记录盒子上报的导航 JSON（来自盒子，只做记录）；"
+                + "下半部分「仪表手动测试」用于把导航投到原车仪表，两者互相独立。"
                 + "请连接手机并开始导航；是否上报取决于盒子固件和导航应用。"
                 + "连接初始化时发送原版 DashboardInfo=7 配置，日志记录收到的导航 JSON 和导航开始/结束消息；"
                 + "配置发送失败请查看错误日志，发送成功不代表盒子已确认。更新后请拔插盒子并重新连接手机。"
@@ -350,75 +366,279 @@ final class SettingsScreens {
         list.addView(logScroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(240)));
         updateNavigationLog();
-        section("仪表手动测试");
-        TextView warning = Ui.text(host, "仅在车辆停稳时测试。转向测试距离固定为 100 米；"
-                + "点击并确认后仅发送一次，不需要连接盒子。"
-                + "CarPlay 导航激活会停止原厂高德导航，结束导航会发送仪表导航停止广播。"
-                + "广播提交不代表仪表已接收，实际兼容性请观察仪表。",
-                13, Ui.TEXT_SECONDARY, false);
-        warning.setPadding(dp(8), dp(12), dp(8), dp(12));
-        list.addView(warning);
-        TextView testStatus = Ui.text(host, "尚未发送测试广播", 13, Ui.TEXT_SECONDARY, false);
-        testStatus.setTextIsSelectable(true);
-        testStatus.setPadding(dp(8), dp(8), dp(8), dp(12));
-        String[] labels = {"左转", "右转", "直行", "左掉头", "到达目的地", "结束导航",
-                "CarPlay 导航激活"};
-        int[] iconIds = {27, 22, 17, 25, 6, -1, -1};
-        LinearLayout buttons = null;
-        for (int i = 0; i < labels.length; i++) {
-            if (i % 2 == 0) {
-                buttons = new LinearLayout(host);
-                buttons.setOrientation(LinearLayout.HORIZONTAL);
-                list.addView(buttons);
-            }
-            final String label = labels[i];
-            final int iconId = iconIds[i];
-            final String action = i == 5 ? "com.autonavi.navigation.NAVIGATION_STOPPED"
-                    : i == 6 ? "carplay_navigation_activated"
-                    : "com.autonavi.navigation.NAVIGATION_UPDATES";
-            Button button = Ui.button(host, label, false);
-            button.setMinimumHeight(dp(48));
-            button.setOnClickListener(view -> confirmNavigationTest(label, action, iconId, testStatus));
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
-            params.setMargins(dp(4), dp(4), dp(4), dp(4));
-            buttons.addView(button, params);
-        }
-        list.addView(testStatus);
+        buildClusterNaviDebugSection();
         return page;
     }
 
-    private void confirmNavigationTest(String label, String action, int iconId, TextView status) {
-        String details = action + (iconId >= 0
-                ? "\nnavigation_id=" + iconId + "\nnavigation_dis=100,m" : "");
-        new AlertDialog.Builder(host).setTitle("仪表测试：" + label)
-                .setMessage("请确认车辆已停稳。"
-                        + ("carplay_navigation_activated".equals(action)
-                        ? "\n此操作会停止原厂高德当前导航。" : "")
-                        + "\n\n将发送一次广播：\n" + details)
+    /**
+     * 仪表导航调试区（规范 {@code docs/仪表导航控制说明.md}）。
+     *
+     * <p>旧版只发 {@code NAVIGATION_UPDATES}(②)、从不发 {@code 10001} 摘要(③)，
+     * 按规范 §4.1「只发 ② 不发 ③，仪表不会更新」，等于从未真正可用。这里改为
+     * 完整的 ①→②③→④ 序列，并按 §8 加状态机保护。
+     */
+    private void buildClusterNaviDebugSection() {
+        section("仪表手动测试");
+        TextView warning = Ui.text(host, "仅在车辆停稳时测试。这是向原车仪表投送导航，"
+                + "与上面的副屏记录无关，也不需要连接盒子。\n"
+                + "顺序必须是 ① 开始 → ②③ 发送 → ④ 结束；只发 ② 不发 ③ 仪表不会更新。\n"
+                + "广播提交不代表仪表已接收，实际效果请观察仪表。", 13, Ui.TEXT_SECONDARY, false);
+        warning.setPadding(dp(8), dp(12), dp(8), dp(12));
+        list.addView(warning);
+
+        clusterNaviStatus = Ui.text(host, "", 13, Ui.TEXT_SECONDARY, false);
+        clusterNaviStatus.setTextIsSelectable(true);
+        clusterNaviStatus.setPadding(dp(8), dp(4), dp(8), dp(4));
+        clusterNaviStateLabel = Ui.text(host, "", 12, Ui.TEXT_SECONDARY, false);
+        clusterNaviStateLabel.setPadding(dp(8), 0, dp(8), dp(8));
+        LinearLayout statusCard = Ui.card(host);
+        statusCard.addView(clusterNaviStatus);
+        statusCard.addView(clusterNaviStateLabel);
+        list.addView(statusCard);
+
+        addRow(clusterNaviButton("原车组件自检", false, view -> checkClusterComponents()));
+        addRow(clusterNaviButton("① 开始导航（EXTRA_STATE=8）", true, view -> {
+            sendClusterMessages(host, clusterNavi.start(), "① 开始导航");
+            refreshClusterNaviStatus();
+        }));
+
+        // 图标选择：47 项较多，用弹窗列表而不是下拉框
+        LinearLayout iconRow = baseRow(true);
+        iconRow.addView(title("② 转向图标"), grow());
+        clusterNaviIconValue = Ui.text(host, "", 13, Ui.ACCENT, false);
+        iconRow.addView(clusterNaviIconValue);
+        iconRow.setOnClickListener(view -> showClusterIconPicker());
+        addRow(iconRow);
+
+        LinearLayout distanceRow = baseRow(false);
+        distanceRow.addView(title("路口距离（米）"), grow());
+        clusterNaviDistance = new EditText(host);
+        clusterNaviDistance.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        clusterNaviDistance.setSingleLine(true);
+        clusterNaviDistance.setText("300");
+        clusterNaviDistance.setTextSize(14);
+        clusterNaviDistance.setGravity(Gravity.END);
+        clusterNaviDistance.setWidth(dp(96));
+        clusterNaviDistance.setContentDescription("路口距离（米）");
+        distanceRow.addView(clusterNaviDistance);
+        addRow(distanceRow);
+
+        addRow(clusterNaviButton("②③ 发送转向 + 摘要（触发提交）", true,
+                view -> sendClusterTurnAndFlush()));
+        addRow(clusterNaviButton("④ 结束导航（清除图标）", false,
+                view -> {
+                    sendClusterMessages(host, clusterNavi.stop(), "④ 结束导航");
+                    refreshClusterNaviStatus();
+                }));
+        addRow(clusterNaviButton("退出导航（EXTRA_STATE=2，可选）", false, view -> {
+            // 规范 §4.2 可选项：直接让原车退出导航
+            Map<String, Object> extras = new LinkedHashMap<>();
+            extras.put("KEY_TYPE", ClusterNavi.KEY_TYPE_STATE);
+            extras.put("EXTRA_STATE", 2);
+            sendClusterMessages(host, Collections.singletonList(
+                    new ClusterNavi.Message(ClusterNavi.ACT_STANDARD, extras)), "退出导航");
+        }));
+
+        refreshClusterNaviStatus();
+    }
+
+    private Button clusterNaviButton(String label, boolean primary,
+            View.OnClickListener listener) {
+        Button button = Ui.button(host, label, primary);
+        button.setMinimumHeight(dp(48));
+        button.setOnClickListener(listener);
+        return button;
+    }
+
+    /** ②③ 必须成对发送（规范 §4.1），所以两者合成一个按钮。 */
+    private void sendClusterTurnAndFlush() {
+        int iconId = clusterNaviIconId;
+        ClusterNaviIcons.Icon icon = ClusterNaviIcons.find(iconId);
+        if (icon == null) {
+            android.widget.Toast.makeText(host, "请先选择转向图标",
+                    android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+        int distance;
+        try {
+            distance = Integer.parseInt(clusterNaviDistance.getText().toString().trim());
+        } catch (NumberFormatException exception) {
+            setClusterNaviMessage("路口距离必须是整数（1~" + ClusterNavi.MAX_DISTANCE + " 米）",
+                    Ui.WARNING);
+            return;
+        }
+        if (!clusterNavi.isActive()) {
+            setClusterNaviMessage("未开始导航，已忽略。请先点 ① 开始导航。", Ui.WARNING);
+            return;
+        }
+        List<ClusterNavi.Message> messages;
+        try {
+            messages = ClusterNavi.combine(
+                    clusterNavi.turn(iconId, distance),
+                    clusterNavi.flush(distance, 0, "", 0, "", ""));
+        } catch (IllegalArgumentException exception) {
+            setClusterNaviMessage(exception.getMessage(), Ui.WARNING);
+            return;
+        }
+        clusterNaviDistance.clearFocus();
+        sendClusterMessages(host, messages,
+                "②③ " + ClusterNaviIcons.describe(icon) + "，" + distance + " 米");
+        refreshClusterNaviStatus();
+    }
+
+    private void showClusterIconPicker() {
+        String[] labels = new String[ClusterNaviIcons.ALL.size()];
+        int checked = 0;
+        for (int index = 0; index < labels.length; index++) {
+            ClusterNaviIcons.Icon icon = ClusterNaviIcons.ALL.get(index);
+            labels[index] = ClusterNaviIcons.describe(icon);
+            if (icon.id == clusterNaviIconId) {
+                checked = index;
+            }
+        }
+        new AlertDialog.Builder(host)
+                .setTitle("选择转向图标（规范 §6）")
+                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                    clusterNaviIconId = ClusterNaviIcons.ALL.get(which).id;
+                    dialog.dismiss();
+                    refreshClusterNaviStatus();
+                })
                 .setNegativeButton("取消", null)
-                .setPositiveButton("发送", (dialog, which) -> {
-                    Intent intent = new Intent(action);
-                    if (iconId >= 0) {
-                        intent.putExtra("navigation_id", iconId);
-                        intent.putExtra("navigation_dis", "100,m");
-                    }
-                    try {
-                        host.sendBroadcast(intent);
-                        String time = new java.text.SimpleDateFormat(
-                                "HH:mm:ss.SSS", java.util.Locale.ROOT).format(new java.util.Date());
-                        status.setText(time + " 已提交：" + label + "\n" + details
-                                + "\n无法确认仪表是否接收，请观察仪表。");
-                        status.setTextColor(Ui.TEXT_SECONDARY);
-                        android.util.Log.i("AutoPlayNavigation", "Manual test broadcast: " + details);
-                    } catch (SecurityException exception) {
-                        android.util.Log.e("AutoPlayNavigation", "Manual test broadcast denied", exception);
-                        status.setText("发送失败：" + exception);
-                        status.setTextColor(Ui.WARNING);
-                        new AlertDialog.Builder(host).setTitle("测试广播发送失败")
-                                .setMessage(exception.toString()).setPositiveButton("知道了", null).show();
-                    }
-                }).show();
+                .show();
+    }
+
+    /**
+     * 原车组件自检（规范 §4.5）。
+     *
+     * <p>只报告安装/启用状态。<b>「已安装」不等于「服务在运行」</b>——接收器是动态注册的，
+     * 普通广播不会拉起这些服务。
+     */
+    private void checkClusterComponents() {
+        String[] packages = {
+                "com.chinatsp.dual.service",
+                "com.chinatsp.tsetservices",
+                "com.chinatsp.mcuservice2",
+        };
+        StringBuilder report = new StringBuilder("原车组件自检（仅安装/启用状态，"
+                + "不代表服务在运行）：");
+        for (String packageName : packages) {
+            String state;
+            int color;
+            try {
+                android.content.pm.ApplicationInfo info =
+                        host.getPackageManager().getApplicationInfo(packageName, 0);
+                if (info.enabled) {
+                    state = "已安装并启用";
+                    color = Ui.TEXT;
+                } else {
+                    state = "已安装但被禁用";
+                    color = Ui.WARNING;
+                }
+            } catch (android.content.pm.PackageManager.NameNotFoundException exception) {
+                state = "未安装";
+                color = Ui.ERROR;
+            }
+            report.append('\n').append(packageName).append('：').append(state);
+            android.util.Log.i("AutoPlayClusterNavi", packageName + " → " + state);
+        }
+        report.append("\n\n若任一组件未安装/禁用，先诊断原车服务，不要改本应用的协议字段。");
+        setClusterNaviMessage(report.toString(), Ui.TEXT_SECONDARY);
+    }
+
+    /**
+     * 按 {@link ClusterNavi.Message} 组装并发送广播。
+     *
+     * <p>{@code putExtra} 必须传<b>基本类型 int</b>：传装箱的 {@code Integer} 会走
+     * {@code Serializable} 重载，原车用 {@code getIntExtra} 读会拿到默认值，
+     * 表现为「发出去了但没反应」（规范 §2.2）。
+     */
+    private void sendClusterMessages(android.content.Context context,
+            List<ClusterNavi.Message> messages, String label) {
+        if (messages.isEmpty()) {
+            setClusterNaviMessage("没有可发送的消息（" + label + "）"
+                    + "\n未开始导航时 ②③④ 都会被忽略，请先点 ①。", Ui.WARNING);
+            return;
+        }
+        StringBuilder text = new StringBuilder();
+        int sent = 0;
+        for (ClusterNavi.Message message : messages) {
+            Intent intent = new Intent(message.action);
+            for (Map.Entry<String, Object> entry : message.extras.entrySet()) {
+                Object value = entry.getValue();
+                if (value instanceof Integer) {
+                    // 关键：intValue() 让重载解析到 putExtra(String, int)
+                    intent.putExtra(entry.getKey(), ((Integer) value).intValue());
+                } else {
+                    intent.putExtra(entry.getKey(), String.valueOf(value));
+                }
+            }
+            try {
+                context.sendBroadcast(intent);
+                sent++;
+                text.append("TX ").append(message).append('\n');
+            } catch (SecurityException exception) {
+                android.util.Log.e("AutoPlayClusterNavi", "广播被拒绝：" + message.action, exception);
+                setClusterNaviMessage("发送失败（SecurityException）：" + exception
+                        + "\n" + message.action, Ui.ERROR);
+                return;
+            }
+        }
+        String time = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT)
+                .format(new java.util.Date());
+        String summary = time + " 已发送 " + sent + " 条：" + label
+                + "\n" + text + "仅表示本应用调用了发送，不代表仪表已切换。";
+        android.util.Log.i("AutoPlayClusterNavi", label + " → " + text);
+        setClusterNaviMessage(summary, Ui.TEXT_SECONDARY);
+    }
+
+    private void setClusterNaviMessage(String message, int color) {
+        if (clusterNaviStatus == null) {
+            return;
+        }
+        clusterNaviStatus.setText(message);
+        clusterNaviStatus.setTextColor(color);
+    }
+
+    /** 刷新图标/状态显示，让「未开始导航」这类前置条件一眼可见。 */
+    private void refreshClusterNaviStatus() {
+        if (clusterNaviIconValue != null) {
+            ClusterNaviIcons.Icon icon = ClusterNaviIcons.find(clusterNaviIconId);
+            clusterNaviIconValue.setText(icon == null
+                    ? "未选择"
+                    : icon.label + " · ID " + icon.id);
+        }
+        if (clusterNaviStateLabel != null) {
+            clusterNaviStateLabel.setText(clusterNavi.isActive() ? "导航中（可发 ②③）" : "未开始");
+            clusterNaviStateLabel.setTextColor(clusterNavi.isActive() ? Ui.ACCENT : Ui.TEXT_SECONDARY);
+        }
+        if (clusterNaviStatus != null && clusterNaviStatus.getText().length() == 0) {
+            setClusterNaviMessage("尚未发送。顺序：① → ②③ → ④。", Ui.TEXT_SECONDARY);
+        }
+    }
+
+    /** Activity 销毁时按规范 §1/§8.4 调用：幂等的 {@code stop()}。 */
+    void releaseClusterNavi() {
+        if (!clusterNavi.isActive()) {
+            return;
+        }
+        List<ClusterNavi.Message> messages = clusterNavi.stop();
+        for (ClusterNavi.Message message : messages) {
+            Intent intent = new Intent(message.action);
+            for (Map.Entry<String, Object> entry : message.extras.entrySet()) {
+                Object value = entry.getValue();
+                if (value instanceof Integer) {
+                    intent.putExtra(entry.getKey(), ((Integer) value).intValue());
+                } else {
+                    intent.putExtra(entry.getKey(), String.valueOf(value));
+                }
+            }
+            try {
+                host.sendBroadcast(intent);
+            } catch (SecurityException exception) {
+                android.util.Log.e("AutoPlayClusterNavi", "退出时清除仪表失败", exception);
+            }
+        }
+        android.util.Log.i("AutoPlayClusterNavi", "页面销毁，已发送仪表导航结束");
     }
 
     void updateNavigationLog() {
@@ -482,6 +702,11 @@ final class SettingsScreens {
         steeringLog = null;
         steeringLogCard = null;
         navigationLog = null;
+        // 仪表调试的视图引用随页面重建失效，状态机本身（clusterNavi）要保留
+        clusterNaviStatus = null;
+        clusterNaviIconValue = null;
+        clusterNaviStateLabel = null;
+        clusterNaviDistance = null;
         boxBluetoothName = boxWifiName = null;
         java.util.Arrays.fill(steeringBindings, null);
         bluetoothStatusIcon = wifiStatusIcon = null;

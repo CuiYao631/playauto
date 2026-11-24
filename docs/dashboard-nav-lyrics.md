@@ -495,6 +495,12 @@ rootView.setBackgroundColor(0xFF000000);
 | subtype `2/3` 专辑封面图未处理 | 需要图片解码与副屏图片区 |
 | subtype `100` 来电信息未处理 | — |
 | 歌词不滚动、不逐字高亮 | 盒子一次只下发一行，副屏只显示当前行 |
+
+> **注意区分两条链路**：本文讲的是**盒子 → 手机 → playAuto 副屏悬浮窗**。
+> 另有一条**手机 → 原车仪表** 的广播链路（高德 `AUTONAVI_*`），
+> 见 [仪表导航控制说明.md](./仪表导航控制说明.md)；调试入口在
+> 设置 → 副屏（仪表投射）→「仪表导航调试」，实现为 `ClusterNavi` /
+> `ClusterNaviIcons`。两条链路互不影响，副屏记录的数据不会自动转到仪表。
 | 无 `MapThemeMode` / `cornerMasks` / `ViewAreaInfo` / `GNSSCapability` | 见 `box-protocol.md` §16 |
 
 ---

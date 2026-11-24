@@ -378,6 +378,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        // 规范 §8.4：Activity 销毁前必须结束仪表导航，否则仪表会停在最后一次转向
+        if (screens != null) {
+            screens.releaseClusterNavi();
+        }
         uiHandler.removeCallbacks(steeringLongPressTask);
         uiHandler.removeCallbacks(vendorLongPressTask);
         steeringPress.reset();

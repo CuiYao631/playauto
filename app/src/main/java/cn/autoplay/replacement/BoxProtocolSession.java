@@ -498,6 +498,8 @@ public final class BoxProtocolSession implements AutoCloseable {
         if (night < 0) {
             return;
         }
+        // 夜间模式开=16 / 关=17，落 logcat 便于验证「大灯联动」整条链路
+        Log.i(TAG, "下发夜间模式=" + night + "（cmd 8 / " + (night == 1 ? 16 : 17) + "）");
         sendCarPlayCommand(night == 1 ? 16 : 17);
         byte[] flag = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(night).array();
         runOnControlExecutor(() -> uploadFile("/tmp/night_mode\0", flag));

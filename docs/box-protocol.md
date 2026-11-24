@@ -555,6 +555,78 @@ sequenceDiagram
 逐条记录。窗口只在本次运行期间保留，`×` 关闭会同时关掉设置开关，`清空` 丢弃
 已记录内容。
 
+### 16.3 大灯模拟悬浮窗（测试夜间模式联动）
+
+「夜间模式 - 大灯联动」依赖车机的 `com.chinatsp.mcumanager.McuManager` 读取大灯状态。
+普通手机/模拟器上没有该服务，`HeadlightNightMode.start()` 会抛
+`ClassNotFoundException` 后放弃，**联动因此无法测试**。
+
+`HeadlightTestOverlay` 用悬浮窗提供「大灯开 / 大灯关」两个按钮，调用
+`HeadlightNightMode.simulate(int)` 伪造状态。它绕过 MCU 监听，但后续链路与真实大灯
+完全一致：
+
+```
+按钮 → simulate(1|0) → nightSetting → changed.run()
+     → ConnectionService.onHeadlightChanged()
+     → （夜间模式 = 大灯联动 时）session.setNightMode()
+     → cmd 8 / 16（夜间）或 cmd 8 / 17（白天）+ 写 /tmp/night_mode
+```
+
+开启方式：设置 → 更多设置 → 调试 → 「大灯模拟悬浮窗」（需要悬浮窗权限）。
+窗口会显示当前大灯状态、夜间模式是否为「大灯联动」、盒子是否已连接、MCU 是否可用。
+
+用 adb 验证整条链路：
+
+```bash
+adb logcat -s AutoPlayConnection AutoPlayProtocol
+# 点「大灯开」→ 模拟大灯=开，夜间模式=大灯联动，已注入=true
+#               下发夜间模式=1（cmd 8 / 16）
+# 点「大灯关」→ 模拟大灯=关，夜间模式=大灯联动，已注入=true
+#               下发夜间模式=0（cmd 8 / 17）
+```
+
+状态没变化时再按一次也会重新下发，便于排查「下发了但盒子没反应」。
+
+### 16.4 大灯状态采集：为什么只靠回调会失败
+
+`app/src/mcuApi` 里的 `McuManager` / `McuDataChangedListener` / `Config.WidthLightStatus`
+是**从车机反推的 compileOnly 桩**，类名、方法名、枚举常量名全是推测的。早期实现直接
+`Callback extends McuDataChangedListener` 并只依赖注册回调，只要有任一处与真机不符，
+就会**注册成功但永远收不到通知**——表现为「夜间模式选了大灯联动，完全不动」。
+
+`HeadlightNightMode` 现在按以下顺序保证能拿到状态：
+
+| 机制 | 作用 |
+|---|---|
+| **轮询 `getWidthLightStatus()`（每 2 s）** | 主要数据源，不依赖回调签名是否正确 |
+| 方法名多候选 | `getWidthLightStatus` / `getLightStatus` / `getWideLightStatus` / `getPositionLightStatus` / `getIlluminanceStatus` |
+| `getInstance()` / `getInstance(Context)` / `getMcuManager()` | 工厂方法名与参数都试一遍 |
+| 监听类型是接口时用 `Proxy` | 不关心回调方法名，只看「1 个参数且方法名含 light」 |
+| 监听类型是类时才用静态子类 | 避免真机上是接口时 `Callback extends` 直接链接失败 |
+| 枚举名按**词元**匹配 | `LIGHT_OPEN` / `WIDTH_LIGHT_ON` / `OPEN` / `NIGHT` 都算开；`LIGHT_CLOSE` / `OFF` / `DISABLE` / `DAY` 都算关；`INVALID`/`UNKNOWN`/`NONE` 保留原值 |
+| 绑定失败每 15 s 重试 | 车机开机时 MCU 服务可能未就绪，首次失败不代表永久不可用 |
+
+诊断入口（都不需要 adb）：
+
+- **设置 → 更多设置 → 调试 → MCU 大灯探测**：反射导出真实的类、方法签名、枚举常量、
+  注册回调的参数类型，并实测读一次值。报告同时写入 `logcat -s AutoPlayHeadlights`。
+- **连接详情**：大灯联动不可用时会出现
+  `大灯联动不可用：<原因>（夜间模式不会随大灯变化…）`；恢复后记录
+  `大灯联动已就绪：已连上车机 MCU`。
+
+在车机上确认时优先看这三行：
+
+```bash
+adb logcat -s AutoPlayHeadlights
+# MCU 已绑定：manager=…，状态方法=getWidthLightStatus，回调=已注册
+#   或 MCU 绑定失败（NoSuchMethodException: …），将只依赖轮询重试
+# 大灯状态变化 → 开（夜间），原始值=com.chinatsp…：LIGHT_OPEN
+```
+
+- 只有「绑定失败」→ 按报告里的候选方法名补进 `GET_STATUS_NAMES`；
+- 能绑定但从不出现「大灯状态变化」→ 拨动大灯开关，若 `lastRawStatus` 变了却没触发，
+  说明枚举名没被识别，把 `probe()` 里的「枚举常量」一行发出来即可补齐。
+
 ### 固件升级链路（已打通）
 
 ```mermaid

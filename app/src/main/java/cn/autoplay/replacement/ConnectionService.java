@@ -54,7 +54,8 @@ public final class ConnectionService extends Service {
     }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final HeadlightNightMode headlightNightMode = new HeadlightNightMode(handler, this::onHeadlightChanged);
+    private final HeadlightNightMode headlightNightMode =
+            new HeadlightNightMode(this, handler, this::onHeadlightChanged);
     private final LocalBinder binder = new LocalBinder();
     private UsbManager usbManager;
     private UsbTransport connection;
@@ -68,6 +69,8 @@ public final class ConnectionService extends Service {
     private SecondaryScreenOverlay secondaryScreen;
     /** 盒子指令日志悬浮窗（调试用），与副屏独立开关。 */
     private BoxLogOverlay boxLogOverlay;
+    /** 大灯模拟悬浮窗（调试用），用于在没有真实 MCU 的环境测试夜间模式联动。 */
+    private HeadlightTestOverlay headlightTestOverlay;
     private volatile boolean clientVisible;
     private boolean foreground;
     private boolean microphoneForeground;
@@ -185,6 +188,8 @@ public final class ConnectionService extends Service {
         }
         // 日志窗口只与设置开关有关，未连接时也要按上次状态恢复
         updateBoxLogOverlay();
+        // 大灯模拟窗口同理
+        updateHeadlightTestOverlay();
         // USB permission and the phone session must be re-established after process death.
         return START_NOT_STICKY;
     }
@@ -936,12 +941,16 @@ public final class ConnectionService extends Service {
 
     void refreshSettings() {
         SharedPreferences prefs = prefs();
-        if (prefs.getInt("night_mode", 2) == 3) headlightNightMode.start();
+        boolean headlightLinked = prefs.getInt("night_mode", 2) == 3;
+        if (headlightLinked) headlightNightMode.start();
         else headlightNightMode.stop();
+        reportHeadlightState(headlightLinked);
         playback.setOutputGain(prefs.getInt("audio_output_gain", 100) / 100f);
         playback.setNavigationMediaGain(prefs.getInt("navigation_media_gain", 100) / 100f);
         capture.setGainDb(prefs.getInt("mic_gain_db", 0));
         updateMediaSession();
+        // 大灯模拟窗口与连接状态无关：未连盒子时也要能打开排查
+        updateHeadlightTestOverlay();
         BoxProtocolSession current = session;
         if (current == null) return;
         // 连接模式固定自动；麦克风固定使用汽车麦克风；驾驶方向固定左舵。
@@ -976,6 +985,8 @@ public final class ConnectionService extends Service {
     }
 
     private void onHeadlightChanged() {
+        // 大灯状态变化（真实或模拟）都要刷新调试窗口里的显示
+        refreshHeadlightTestStatus();
         if (destroyed || prefs().getInt("night_mode", 2) != 3) return;
         BoxProtocolSession current = session;
         if (current != null) current.setNightMode(headlightNightMode.currentSetting());
@@ -1325,6 +1336,143 @@ public final class ConnectionService extends Service {
     /** 设置页切换「盒子指令日志」开关后调用。 */
     void refreshBoxLogOverlay() {
         updateBoxLogOverlay();
+    }
+
+    // ---- 大灯模拟（调试） ----
+
+    private void updateHeadlightTestOverlay() {
+        if (destroyed) {
+            return;
+        }
+        if (!prefs().getBoolean(HeadlightTestOverlay.PREF_ENABLED, false)) {
+            hideHeadlightTestOverlay();
+            return;
+        }
+        if (!AndroidCompat.canDrawOverlays(this)) {
+            Log.w(TAG, "大灯模拟已开启，但缺少「显示在其他应用上层」权限");
+            hideHeadlightTestOverlay();
+            return;
+        }
+        showHeadlightTestOverlay();
+    }
+
+    private void showHeadlightTestOverlay() {
+        if (destroyed) {
+            return;
+        }
+        if (headlightTestOverlay == null) {
+            headlightTestOverlay = new HeadlightTestOverlay(this,
+                    new HeadlightTestOverlay.WindowListener() {
+                @Override public void onCloseRequested() {
+                    prefs().edit()
+                            .putBoolean(HeadlightTestOverlay.PREF_ENABLED, false).apply();
+                    hideHeadlightTestOverlay();
+                    notifyClient();
+                }
+
+                @Override public void onSimulate(int setting) {
+                    simulateHeadlight(setting);
+                }
+            });
+        }
+        if (!headlightTestOverlay.isShowing()) {
+            headlightTestOverlay.show();
+        }
+        refreshHeadlightTestStatus();
+    }
+
+    private void hideHeadlightTestOverlay() {
+        HeadlightTestOverlay current = headlightTestOverlay;
+        if (current != null && current.isShowing()) {
+            current.hide();
+        }
+    }
+
+    /** 设置页切换「大灯模拟」开关后调用。 */
+    void refreshHeadlightTestOverlay() {
+        updateHeadlightTestOverlay();
+    }
+
+    /** 「高级功能 → MCU 大灯探测」调用的反射报告。 */
+    String mcuProbeReport() {
+        return headlightNightMode.probe();
+    }
+
+    /** 上次写入连接详情的大灯状态说明，避免重复记录刷满诊断缓冲。 */
+    private String lastHeadlightDiagnostic = "";
+    /** 上一次检查时大灯联动是否不可用，用于记录「恢复可用」。 */
+    private boolean headlightWasUnavailable;
+
+    /**
+     * 把大灯联动是否真的可用写进「连接详情」。
+     *
+     * <p>拿不到 MCU 状态是「夜间模式不动」最常见的原因，但表现是完全静默的：
+     * 没有异常弹窗，盒子也收不到指令。这里显式留档，用户在设置页就能看到结论，
+     * 不必连 adb。
+     */
+    private void reportHeadlightState(boolean linked) {
+        if (linked && !headlightNightMode.mcuAvailable()) {
+            String error = headlightNightMode.bindError();
+            String message = "大灯联动不可用："
+                    + (error.isEmpty() ? "尚未绑定车机 MCU" : error)
+                    + "（夜间模式不会随大灯变化；可在「调试 → MCU 大灯探测」查看原因）";
+            if (!message.equals(lastHeadlightDiagnostic)) {
+                lastHeadlightDiagnostic = message;
+                Log.w(TAG, message);
+                recordDiagnostic(message);
+            }
+            headlightWasUnavailable = true;
+            return;
+        }
+        if (headlightWasUnavailable) {
+            headlightWasUnavailable = false;
+            lastHeadlightDiagnostic = "";
+            recordDiagnostic(linked ? "大灯联动已就绪：已连上车机 MCU" : "大灯联动已关闭");
+        }
+    }
+
+    /** 伪造一次大灯状态，走与真实大灯完全相同的回调链路。 */
+    private void simulateHeadlight(int setting) {
+        int mode = prefs().getInt("night_mode", 2);
+        boolean applied = headlightNightMode.simulate(setting);
+        Log.i(TAG, "模拟大灯=" + (setting == 1 ? "开" : "关")
+                + "，夜间模式=" + (mode == 3 ? "大灯联动" : "跟随手机")
+                + "，已注入=" + applied
+                + (mode == 3 ? "" : "（当前不是大灯联动，不会下发盒子）"));
+        if (mode != 3) {
+            setPhoneStatus("大灯模拟：夜间模式需选「大灯联动」才会下发盒子");
+        }
+        refreshHeadlightTestStatus();
+    }
+
+    /** 把当前大灯/夜间模式状态写进悬浮窗，便于边操作边核对。 */
+    private void refreshHeadlightTestStatus() {
+        HeadlightTestOverlay overlay = headlightTestOverlay;
+        if (overlay == null) {
+            return;
+        }
+        int mode = prefs().getInt("night_mode", 2);
+        int light = headlightNightMode.currentSetting();
+        boolean linked = mode == 3;
+        boolean connected = session != null;
+        StringBuilder summary = new StringBuilder();
+        summary.append("大灯：")
+                .append(light == 1 ? "开（夜间）" : light == 0 ? "关（白天）" : "未知")
+                .append('\n')
+                .append("夜间模式：")
+                .append(linked ? "大灯联动" : "跟随手机（不生效）")
+                .append('\n')
+                .append("盒子：").append(connected ? "已连接" : "未连接")
+                .append("　MCU：").append(headlightNightMode.mcuAvailable() ? "可用" : "不可用")
+                .append('\n');
+        if (!linked) {
+            summary.append("请先在设置里把夜间模式改成「大灯联动」");
+        } else if (!connected) {
+            summary.append("盒子未连接，指令不会送达");
+        } else {
+            summary.append("开灯 → cmd 8/16（夜间），关灯 → cmd 8/17（白天）");
+        }
+        overlay.setStatus(light, summary.toString());
     }
 
     /** 会话异常结束后按退避间隔自动重试，避免一直卡在「连接失败」。 */

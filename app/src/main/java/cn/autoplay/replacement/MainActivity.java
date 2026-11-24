@@ -755,6 +755,52 @@ public final class MainActivity extends Activity {
         return service == null ? "连接服务未就绪，请返回首页稍候" : service.usbDiagnostics();
     }
 
+    /**
+     * 「高级功能 → MCU 大灯探测」：反射导出车机 MCU 的真实接口结构。
+     *
+     * <p>大灯联动能不能用取决于车机上 {@code com.chinatsp.mcumanager} 的实际形态，
+     * 而项目里的 mcuApi 只是推断的桩。这里把真实的类、方法、枚举常量都打出来，
+     * 同时写 logcat，便于在车机上直接定位名字/签名不一致的问题。
+     */
+    void showMcuProbe() {
+        ConnectionService service = connectionService;
+        android.util.Log.i("AutoPlayHeadlights", "用户触发 MCU 大灯探测");
+        if (service == null) {
+            new AlertDialog.Builder(this)
+                    .setTitle("MCU 大灯探测")
+                    .setMessage("连接服务未就绪，请返回首页稍候再试。")
+                    .setPositiveButton("知道了", null)
+                    .show();
+            return;
+        }
+        // 反射 + 一次 MCU 读取，放在后台线程避免卡住界面
+        new Thread(() -> {
+            String report;
+            try {
+                report = service.mcuProbeReport();
+            } catch (RuntimeException | LinkageError exception) {
+                report = "探测失败：" + exception;
+                android.util.Log.w("AutoPlayHeadlights", report, exception);
+            }
+            String text = report;
+            runOnUiThread(() -> new AlertDialog.Builder(this)
+                    .setTitle("MCU 大灯探测")
+                    .setMessage(text + "\n（同样内容已写入 logcat：AutoPlayHeadlights）")
+                    .setPositiveButton("知道了", null)
+                    .setNegativeButton("复制", (dialog, which) -> {
+                        android.content.ClipboardManager clipboard =
+                                (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                        if (clipboard != null) {
+                            clipboard.setPrimaryClip(
+                                    android.content.ClipData.newPlainText("MCU 探测", text));
+                            android.widget.Toast.makeText(this, "已复制到剪贴板",
+                                    android.widget.Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .show());
+        }, "autoplay-mcu-probe").start();
+    }
+
     private static String connectionStateLabel(int state) {
         switch (state) {
             case Ui.STATE_OK:
@@ -964,6 +1010,32 @@ public final class MainActivity extends Activity {
                         + "\n\n拖动标题栏可移动；「清空」丢弃已记录的日志；"
                         + "「×」关闭窗口并同时关闭本开关。保留最近 200 条，最新在最上面。"
                         + "\n\n日志只在本次应用运行期间保留，服务销毁后清空。"
+                        + "需要「显示在其他应用上层」权限。")
+                .setPositiveButton("知道了", null)
+                .show();
+    }
+
+    void onHeadlightTestOverlayChanged(boolean enabled) {
+        if (enabled && !AndroidCompat.canDrawOverlays(this)) {
+            Toast.makeText(this, "大灯模拟窗口需要「显示在其他应用上层」权限，请先授权",
+                    Toast.LENGTH_LONG).show();
+            openOverlayPermission();
+        }
+        ConnectionService service = connectionService;
+        if (service != null) service.refreshHeadlightTestOverlay();
+    }
+
+    void showHeadlightTestOverlayHelp() {
+        new AlertDialog.Builder(this)
+                .setTitle("大灯模拟悬浮窗")
+                .setMessage("「夜间模式 - 大灯联动」依赖车机的 McuManager 服务读取大灯状态，"
+                        + "普通手机上没有该服务，无法测试。"
+                        + "\n\n打开本开关后会出现一个悬浮窗，点「大灯开 / 大灯关」伪造大灯状态，"
+                        + "后续「回调 → 下发盒子 cmd 8/16（夜间）或 cmd 8/17（白天）→ "
+                        + "CarPlay 昼夜切换」与真实大灯完全一致。"
+                        + "\n\n使用前提：设置 → 夜间模式选「大灯联动」，且盒子已连接。"
+                        + "悬浮窗会显示当前条件是否满足。"
+                        + "\n\n拖动标题栏可移动；「×」关闭窗口并同时关闭本开关。"
                         + "需要「显示在其他应用上层」权限。")
                 .setPositiveButton("知道了", null)
                 .show();

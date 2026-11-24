@@ -183,6 +183,9 @@ final class SettingsScreens {
         toggleRow("盒子指令日志窗口", BoxLogOverlay.PREF_ENABLED, false,
                 host::onBoxLogOverlayChanged, host::showBoxLogOverlayHelp);
         navigationRow("清空盒子指令日志", host::clearBoxCommandLog);
+        toggleRow("大灯模拟悬浮窗", HeadlightTestOverlay.PREF_ENABLED, false,
+                host::onHeadlightTestOverlayChanged, host::showHeadlightTestOverlayHelp);
+        navigationRow("MCU 大灯探测", host::showMcuProbe);
 
         section("盒子配置（部分设置需重连手机）");
         boxBluetoothName = boxNameRow("蓝牙名称", true);

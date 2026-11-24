@@ -81,6 +81,24 @@ public final class ProtocolFrameSelfTest {
         check(Maneuver.fromOrderTypeNew(12345, -1) == Maneuver.UNKNOWN, "表外取值");
         check(Maneuver.fromOrderTypeNew(-1, -1) == Maneuver.UNKNOWN, "no data is unknown");
 
+        // 大灯模拟：与真实大灯共用同一条回调链路，必须能在纯 JVM 下验证
+        final int[] fired = {0};
+        HeadlightNightMode headlight = new HeadlightNightMode(null, null, () -> fired[0]++);
+        check(headlight.currentSetting() == -1, "headlight starts unknown");
+        check(headlight.simulate(0), "simulate accepts 0");
+        check(headlight.currentSetting() == 0, "simulate sets close");
+        check(fired[0] == 1, "simulate fires callback once");
+        check(headlight.simulate(1), "simulate accepts 1");
+        check(headlight.currentSetting() == 1, "simulate sets open");
+        check(fired[0] == 2, "simulate fires callback again on change");
+        check(headlight.simulate(1), "simulate accepts repeat");
+        check(fired[0] == 3, "repeat still fires so resend works");
+        check(!headlight.simulate(2), "simulate rejects invalid value");
+        check(headlight.currentSetting() == 1, "invalid value keeps state");
+        check(!headlight.mcuAvailable(), "no MCU in test environment");
+        check(!headlight.callbackSeen(), "no callback without MCU");
+        check(HeadlightNightMode.settingForStatus(null, 1) == 1, "null status keeps state");
+
         MediaText media = new MediaText();
         check(!media.hasContent(), "fresh media state has no content");
         check(media.lyricLine().isEmpty(), "fresh media has no lyric line");
@@ -565,6 +583,12 @@ public final class ProtocolFrameSelfTest {
 
     private enum LightStatus { LIGHT_OPEN, LIGHT_CLOSE, LIGHT_INVALID }
 
+    /** 真机上可能出现的其它命名，用于验证词元匹配不依赖具体拼写。 */
+    private enum AltLightStatus {
+        WIDTH_LIGHT_ON, WIDTH_LIGHT_OFF, OPEN, CLOSE, LIGHT_ENABLE, LIGHT_DISABLE,
+        UNKNOWN, NONE, NIGHT, DAY
+    }
+
     private static void testHeadlightNightMode() {
         check(HeadlightNightMode.settingForStatus(LightStatus.LIGHT_OPEN, -1) == 1,
                 "headlights on enables night mode");
@@ -576,12 +600,45 @@ public final class ProtocolFrameSelfTest {
             check(HeadlightNightMode.settingForStatus(LightStatus.LIGHT_INVALID, previous) == previous,
                     "invalid light status retains last known state");
         }
-        check(HeadlightNightMode.settingForStatus("LIGHT_CLOSE", 1) == 1,
-                "unexpected status type must not turn night mode off");
+        check(HeadlightNightMode.settingForStatus("LIGHT_CLOSE", 1) == 0,
+                "plain string status is parsed by token");
         check(HeadlightNightMode.settingForStatus(LightStatus.LIGHT_CLOSE,
                 HeadlightNightMode.settingForStatus(LightStatus.LIGHT_INVALID,
                         HeadlightNightMode.settingForStatus(LightStatus.LIGHT_OPEN, -1))) == 0,
                 "valid light changes resume after unknown status");
+
+        // 真机枚举常量名未知，必须靠词元识别而不是精确匹配
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.WIDTH_LIGHT_ON, -1) == 1,
+                "WIDTH_LIGHT_ON detected as on");
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.WIDTH_LIGHT_OFF, -1) == 0,
+                "WIDTH_LIGHT_OFF detected as off");
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.OPEN, -1) == 1, "OPEN is on");
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.CLOSE, -1) == 0, "CLOSE is off");
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.LIGHT_ENABLE, -1) == 1,
+                "LIGHT_ENABLE is on");
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.LIGHT_DISABLE, -1) == 0,
+                "LIGHT_DISABLE is off");
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.NIGHT, -1) == 1, "NIGHT is on");
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.DAY, -1) == 0, "DAY is off");
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.UNKNOWN, 1) == 1,
+                "UNKNOWN keeps state");
+        check(HeadlightNightMode.settingForStatus(AltLightStatus.NONE, 0) == 0,
+                "NONE keeps state");
+        check(HeadlightNightMode.settingForStatus("garbage", 1) == 1,
+                "unrecognized name keeps state rather than guessing");
+
+        // 部分固件的 getter 直接返回整数 / 布尔
+        check(HeadlightNightMode.settingForStatus(1, -1) == 1, "integer 1 is on");
+        check(HeadlightNightMode.settingForStatus(0, -1) == 0, "integer 0 is off");
+        check(HeadlightNightMode.settingForStatus(Boolean.TRUE, -1) == 1, "true is on");
+        check(HeadlightNightMode.settingForStatus(Boolean.FALSE, -1) == 0, "false is off");
+
+        // 探测报告必须在没有 McuManager 的环境下也能正常生成（不能抛异常）
+        String report = new HeadlightNightMode(null, null, null).buildProbeReport();
+        check(report.contains("AutoPlay MCU 探测"), "probe report has header");
+        check(report.contains("McuManager"), "probe report mentions McuManager");
+        check(report.contains("没有 McuManager") || report.contains("找不到"),
+                "probe report explains missing MCU instead of crashing");
     }
 
     private static void testOriginalVideoOptions() {

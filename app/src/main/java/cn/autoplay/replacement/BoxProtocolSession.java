@@ -97,6 +97,9 @@ public final class BoxProtocolSession implements AutoCloseable {
      * 5 秒内已经报过就不再重复，避免盒子反复上报同一阶段时刷帧。
      */
     private static final long NAVI_SCREEN_INFO_REFRESH_MS = 5000L;
+    /** 仪表配置写失败后的退避重试：首次 2 秒，逐次翻倍，上限 30 秒。 */
+    private static final long DASHBOARD_CONFIG_RETRY_BASE_MS = 2_000L;
+    private static final long DASHBOARD_CONFIG_RETRY_MAX_MS = 30_000L;
     /**
      * 单次 bulk 写超时。原版固定用 4000 ms（{@code bulkTransfer(..., 4000)}）。
      *
@@ -286,6 +289,12 @@ public final class BoxProtocolSession implements AutoCloseable {
     private volatile int[] pendingNaviScreenInfo;
     /** 上次成功写入副屏尺寸的时间，用于阶段转变时的补发限速。 */
     private volatile long lastNaviScreenInfoSentAt;
+    /** 上次成功写入 {@code CMD 25} 仪表配置的时间，用于补发限速。 */
+    private volatile long lastDashboardConfigSentAt;
+    /** 仪表配置补发的下次重试时刻；{@code 0} 表示没有待重试。 */
+    private volatile long dashboardConfigRetryAt;
+    /** 仪表配置连续写失败次数，用于指数退避。 */
+    private volatile int dashboardConfigRetryAttempt;
     /** 是否已经收到过副屏画面（只用于首帧日志，避免每帧刷 logcat）。 */
     private volatile boolean dashboardFrameSeen;
     /** 各类 cmd 42 子类型的上次日志时间（只用于日志限速）。 */
@@ -420,12 +429,19 @@ public final class BoxProtocolSession implements AutoCloseable {
                 try {
                     writeFrame(ProtocolFrame.encode(setting.command, setting.payload(), cryptEnabled, nonce));
                 } catch (IOException exception) {
+                    if (setting.command == 25) {
+                        // 盒子在写 /etc 或重启 CarPlay 服务时会短暂拒收，交给退避重试
+                        scheduleDashboardConfigRetry();
+                    }
                     if (setting.command == 25 && listener != null) {
                         listener.onNavigationData("CMD 25 配置写入失败："
                                 + new String(setting.payload(), java.nio.charset.StandardCharsets.UTF_8)
                                 + "\n" + exception.getMessage());
                     }
                     throw exception;
+                }
+                if (setting.command == 25) {
+                    lastDashboardConfigSentAt = SystemClock.elapsedRealtime();
                 }
                 if (setting.command == 25 && listener != null) {
                     listener.onNavigationData("CMD 25 配置已写入 USB："
@@ -648,6 +664,7 @@ public final class BoxProtocolSession implements AutoCloseable {
                 } else if (packet.command == 204 && packet.payload.length >= 18) {
                     boxSoftwareVersion = new String(
                             packet.payload, 0, 18, java.nio.charset.StandardCharsets.ISO_8859_1).trim();
+                    Log.i(TAG, "CMD 204 盒子软件版本=" + boxSoftwareVersion);
                     publish("车机盒软件版本：" + boxSoftwareVersion);
                     if (listener != null) {
                         listener.onBoxVersion(boxSoftwareVersion);
@@ -676,6 +693,8 @@ public final class BoxProtocolSession implements AutoCloseable {
                     phonePlugged = false;
                     callState = 0;
                     wifiConnected = false;
+                    // 新会话必须重新下发仪表配置，不能沿用上一轮的「已发送」标记
+                    resetDashboardConfigState();
                     publishLinkState();
                 } else if (packet.command == 13 || packet.command == 14) {
                     try {
@@ -861,8 +880,13 @@ public final class BoxProtocolSession implements AutoCloseable {
             boxProductType = productType;
             boxFirmwareName = firmwareName;
 
+            // supportFeatures 决定盒子是否支持 naviScreen（副屏/仪表），
+            // 缺了它就不会有 cmd 44 / 42-200，与配置无关，必须留证
+            String features = json.optString("supportFeatures", "");
+            Log.i(TAG, "CMD_BOX_INFO：" + text);
             publish("盒子信息：uuid=" + uuid + "，厂商=" + manufacturer
-                    + "，型号=" + productType + "，固件包=" + firmwareName);
+                    + "，型号=" + productType + "，固件包=" + firmwareName
+                    + (features.isEmpty() ? "" : "，特性=" + features));
             if (listener != null) {
                 listener.onBoxInfo(uuid, manufacturer, productType, firmwareName);
             }
@@ -1046,6 +1070,8 @@ public final class BoxProtocolSession implements AutoCloseable {
                             return;
                         }
                     }
+                    // 复用心跳节拍做仪表配置自检（写失败重试 / 导航中无数据补发）
+                    tickDashboardConfig();
                 }
             }
         }, "autoplay-box-heartbeat");
@@ -1097,6 +1123,10 @@ public final class BoxProtocolSession implements AutoCloseable {
         phonePlugged = true;
         callState = 0;
         wifiConnected = wifiFlag;
+        // 手机类型决定链路（CarPlay / Android Auto / HiCar…），
+        // 42/200 导航数据只对 CarPlay 生效，必须能在 adb 侧直接看到
+        Log.i(TAG, "CMD 2 手机类型=" + phoneType + "（" + phoneTypeName(phoneType)
+                + "），Wi-Fi=" + wifiFlag);
         publishLinkState();
         publishPhoneStatus("已检测到 " + phoneTypeName(phoneType)
                 + (wifiFlag ? "，Wi-Fi 已连接" : "，等待连接"));
@@ -1148,6 +1178,7 @@ public final class BoxProtocolSession implements AutoCloseable {
         }
         int phase = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt();
         phonePhase = phase;
+        Log.i(TAG, "CMD 3 手机阶段=" + phase);
         switch (phase) {
             case 3:
                 phoneWorking = true;
@@ -1253,13 +1284,111 @@ public final class BoxProtocolSession implements AutoCloseable {
     }
 
     private void writeNaviScreenInfo(int[] info) {
-        byte[] payload = BoxSetting.naviScreenInfo(info[0], info[1], info[2], info[3])
-                .payload();
-        lastNaviScreenInfoSentAt = SystemClock.elapsedRealtime();
-        Log.i(TAG, "上报副屏尺寸 " + info[0] + "x" + info[1] + " @" + info[2]
-                + " fps, " + info[3] + " dpi");
-        runOnControlExecutor(() -> writeFrame(
-                ProtocolFrame.encode(25, payload, cryptEnabled, nonce)));
+        BoxSetting setting = BoxSetting.naviScreenInfo(info[0], info[1], info[2], info[3]);
+        String description = "副屏尺寸 " + info[0] + "x" + info[1] + " @" + info[2]
+                + " fps, " + info[3] + " dpi";
+        runOnControlExecutor(() -> {
+            if (writeDashboardSetting(setting, description)) {
+                lastNaviScreenInfoSentAt = SystemClock.elapsedRealtime();
+            }
+        });
+    }
+
+    /**
+     * 写入一条 {@code CMD_BOX_SETTINGS}(25) 仪表配置，成功后才更新「已下发」时间戳。
+     *
+     * <p>AutoKit 原版 {@code O0()} 在写失败时静默丢弃，盒子拿不到 {@code naviScreenInfo}
+     * 就永远不下发导航数据；这里改为记下失败并交给 {@link #tickDashboardConfig()}
+     * 按指数退避重试。
+     *
+     * @return 是否已写入 USB（不代表盒子已接受）
+     */
+    private boolean writeDashboardSetting(BoxSetting setting, String description) {
+        try {
+            writeFrame(ProtocolFrame.encode(setting.command, setting.payload(), cryptEnabled, nonce));
+        } catch (IOException exception) {
+            scheduleDashboardConfigRetry();
+            publishDiagnostic("下发" + description + "失败，稍后自动重试：" + exception.getMessage());
+            if (listener != null) {
+                listener.onNavigationData("CMD 25 配置写入失败（将自动重试）：" + description
+                        + "\n" + exception.getMessage());
+            }
+            return false;
+        }
+        dashboardConfigRetryAt = 0;
+        dashboardConfigRetryAttempt = 0;
+        lastDashboardConfigSentAt = SystemClock.elapsedRealtime();
+        Log.i(TAG, "已下发" + description);
+        if (listener != null) {
+            listener.onNavigationData("CMD 25 配置已写入 USB：" + description
+                    + "\n仅确认本地写入完成，不代表盒子确认；等待 CMD 42 / 200 导航 JSON。");
+        }
+        return true;
+    }
+
+    /** 安排一次退避重试；连续失败时延时间隔翻倍，避免盒子忙的时候刷 USB。 */
+    private void scheduleDashboardConfigRetry() {
+        int attempt = Math.min(dashboardConfigRetryAttempt + 1, 5);
+        dashboardConfigRetryAttempt = attempt;
+        long delay = Math.min(
+                DASHBOARD_CONFIG_RETRY_BASE_MS << (attempt - 1), DASHBOARD_CONFIG_RETRY_MAX_MS);
+        dashboardConfigRetryAt = SystemClock.elapsedRealtime() + delay;
+    }
+
+    /**
+     * 主动补发仪表配置：{@code DashboardInfo=7} + 当前副屏尺寸。
+     *
+     * <p>盒子重启 CarPlay 服务、USB 抖动重连后配置会丢，而丢了配置就不会产生
+     * {@code CMD 42 / 200} 导航数据（媒体/歌词走 CarPlay NowPlaying，另一路不受影响，
+     * 所以现象是「歌词正常、导航为空」）。
+     *
+     * @param reason 触发原因，写进连接详情便于定位
+     */
+    private void resendDashboardConfig(String reason) {
+        if (closed || !protocolReady) {
+            return;
+        }
+        int[] info = pendingNaviScreenInfo;
+        Log.i(TAG, "补发仪表配置（" + reason + "）");
+        publishDiagnostic("补发仪表配置：" + reason);
+        runOnControlExecutor(() -> {
+            writeDashboardSetting(BoxSetting.dashboardInfo(), "DashboardInfo=7");
+            if (info != null) {
+                BoxSetting setting = BoxSetting.naviScreenInfo(info[0], info[1], info[2], info[3]);
+                if (writeDashboardSetting(setting, "副屏尺寸 " + info[0] + "x" + info[1])) {
+                    lastNaviScreenInfoSentAt = SystemClock.elapsedRealtime();
+                }
+            }
+        });
+    }
+
+    /**
+     * 心跳节拍里的仪表配置重试。
+     *
+     * <p>只处理「上次写入 USB 失败」，按指数退避重发。
+     *
+     * <p><b>不要用「没有导航数据」触发补发</b>：实测 {@code CMD 42 / 200} 是事件驱动的，
+     * 只在下发数值发生变化时推送（车停住时 85 秒内 {@code NaviRemainDistance} 只走 1 米，
+     * 期间一个包都没有）。按「30 秒没有 200」补发会在每个红灯误触发，且实测补发
+     * 8 次也救不回缺失的数据 —— 缺失来自 CarPlay 前台 App 不是导航，与配置无关。
+     */
+    private void tickDashboardConfig() {
+        if (closed || !protocolReady) {
+            return;
+        }
+        long retryAt = dashboardConfigRetryAt;
+        if (retryAt == 0 || SystemClock.elapsedRealtime() < retryAt) {
+            return;
+        }
+        dashboardConfigRetryAt = 0;
+        resendDashboardConfig("上次写入失败，第 " + dashboardConfigRetryAttempt + " 次重试");
+    }
+
+    /** 手机断开/会话重置时清掉「已下发」标记，下一轮会话必须重新下发仪表配置。 */
+    private void resetDashboardConfigState() {
+        lastDashboardConfigSentAt = 0;
+        dashboardConfigRetryAt = 0;
+        dashboardConfigRetryAttempt = 0;
     }
 
     /**
@@ -1274,11 +1403,16 @@ public final class BoxProtocolSession implements AutoCloseable {
         if (info == null || !protocolReady || closed) {
             return;
         }
+        if (dashboardConfigRetryAt != 0) {
+            // 已经排了退避重试，别再叠加一帧
+            return;
+        }
         if (SystemClock.elapsedRealtime() - lastNaviScreenInfoSentAt
                 < NAVI_SCREEN_INFO_REFRESH_MS) {
             return;
         }
-        writeNaviScreenInfo(info);
+        // 盒子新起一轮 CarPlay 会话时两份配置会一起丢，DashboardInfo 也补一遍
+        resendDashboardConfig("手机进入工作态，补发仪表配置");
     }
 
     /**
@@ -1361,6 +1495,11 @@ public final class BoxProtocolSession implements AutoCloseable {
             throw new IOException("Invalid CarPlay command payload length: " + payload.length);
         }
         int subcommand = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).getInt();
+        // 导航/播放状态全在这条命令里，且只在应用内日志窗口可见；
+        // 500 以上（导航起止、蓝牙/Wi-Fi、自动连接）低频，直接落 logcat 便于 adb 判定
+        if (subcommand >= 500) {
+            Log.i(TAG, "CMD 8 子命令=" + subcommand);
+        }
         if (subcommand == 1) {
             microphoneRequested = true;
             if (microphoneDecodeType > 0 && listener != null) {
@@ -1377,8 +1516,11 @@ public final class BoxProtocolSession implements AutoCloseable {
             android.util.Log.i("AutoPlay", "CarPlay_RequestHostUI");
             if (listener != null) listener.onHostUiRequested();
         } else if (subcommand == 506 || subcommand == 507) {
-            if (subcommand == 506 && listener != null) listener.onNavigationStarted();
-            if (subcommand == 507 && listener != null) listener.onNavigationEnded();
+            if (subcommand == 506) {
+                if (listener != null) listener.onNavigationStarted();
+            } else if (listener != null) {
+                listener.onNavigationEnded();
+            }
             if (listener != null) listener.onNavigationData("CMD 8 / " + subcommand
                     + (subcommand == 506 ? "：盒子通知导航开始" : "：盒子通知导航结束")
                     + "（独立状态消息，不是导航 JSON）");

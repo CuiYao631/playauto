@@ -140,7 +140,18 @@ final class NavigationText {
             }
         }
 
-        if (changed) {
+        // 包里只要还有道路/距离/转向等实际导航字段，就说明导航仍在进行。
+        //
+        // 实测盒子在建链瞬间会连发 NaviStatus 0/2 交替（61 ms 内 7 条）。若最后
+        // 落地的是 0，endPending 会一直为 true；而下面刻意在 endPending 时不刷新
+        // lastActiveAt，于是 shouldShow() 在 3 秒后返回 false，导航区永久隐藏 ——
+        // 即使 42/200 一直在流，也要等盒子再发一次 NaviStatus>0 才恢复。
+        boolean content = hasNavigationContent(data);
+        if (content) {
+            endPending = false;
+        }
+
+        if (changed || content) {
             if (endPending) {
                 status = "导航已结束";
             } else {
@@ -152,6 +163,24 @@ final class NavigationText {
             // 否则一次误发的 NaviStatus=0 会在 3 秒后把画面清掉。
             lastActiveAt = now;
         }
+    }
+
+    /** 除 {@code NaviStatus} 之外的导航内容字段（出现任意一个即视为导航进行中）。 */
+    private static final String[] CONTENT_KEYS = {
+            "NaviRoadName", "NaviRemainDistance", "NaviTurnAngle", "NaviTurnSide",
+            "NaviManeuverType", "NaviOrderType", "NaviOrderTypeNew",
+            "NaviNextTurnTimeSeconds", "NaviTimeToDestination",
+            "NaviDistanceToDestination", "NaviDestinationName",
+    };
+
+    /** 该包是否携带实际导航内容（区别于只有 {@code NaviStatus} 的状态包）。 */
+    static boolean hasNavigationContent(JSONObject data) {
+        for (String key : CONTENT_KEYS) {
+            if (data.has(key)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 是否有可显示的内容（不代表当前应显示，需再看 {@link #shouldShow(long)}）。 */
@@ -187,9 +216,9 @@ final class NavigationText {
     /**
      * 当前转向类型，用于绘制箭头。
      *
-     * <p>优先用 {@code NaviOrderTypeNew}（实测与 CarPlay {@code CPManeuverType} 一致）；
+     * <p>优先用 {@code NaviOrderTypeNew}（高德转向图标编号，见 {@link Maneuver}）；
      * 该字段缺失时才退化到 {@code NaviTurnAngle}（真实角度，需足够大才有意义）
-     * 与 {@code NaviTurnSide}（1=右、2=左）。
+     * 与 {@code NaviTurnSide}。
      *
      * <p>注意 {@code NaviTurnAngle} 实测常只有 {@code 1~4}，是道路走向的微小变化，
      * <b>不能</b>当作转向分类使用。
@@ -207,6 +236,8 @@ final class NavigationText {
             return left > 110 ? Maneuver.SHARP_LEFT
                     : left > 60 ? Maneuver.LEFT : Maneuver.SLIGHT_LEFT;
         }
+        // TurnSide 的左右语义存疑（两个样本互相矛盾，见 Maneuver 类注释），
+        // 这里保持历史行为，只在 OrderTypeNew 缺失时兜底。
         if (turnSide == 1) return Maneuver.RIGHT;
         if (turnSide == 2) return Maneuver.LEFT;
         return Maneuver.STRAIGHT;

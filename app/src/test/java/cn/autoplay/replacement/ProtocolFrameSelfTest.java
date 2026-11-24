@@ -50,19 +50,35 @@ public final class ProtocolFrameSelfTest {
         check(empty.text().contains("等待盒子上报导航数据"), "fresh navigation shows waiting text");
         check(empty.maneuver() == Maneuver.STRAIGHT, "fresh navigation defaults to straight");
 
-        // NaviOrderTypeNew 映射（样本来自真机 42/200 实抓）
-        check(Maneuver.fromOrderTypeNew(7, 2) == Maneuver.LEFT, "7 maps to left turn");
-        check(Maneuver.fromOrderTypeNew(4, 1) == Maneuver.SHARP_RIGHT, "4 maps to sharp right");
-        check(Maneuver.fromOrderTypeNew(8, -1) == Maneuver.SLIGHT_LEFT, "8 maps to slight left");
-        check(Maneuver.fromOrderTypeNew(2, 1) == Maneuver.SLIGHT_RIGHT, "2 maps to slight right");
-        check(Maneuver.fromOrderTypeNew(1, -1) == Maneuver.STRAIGHT, "1 maps to straight");
-        check(Maneuver.fromOrderTypeNew(5, -1) == Maneuver.UTURN, "5 maps to u-turn");
-        check(Maneuver.fromOrderTypeNew(9, -1) == Maneuver.ARRIVE, "9 maps to arrive");
-        check(Maneuver.fromOrderTypeNew(16, -1) == Maneuver.ROUNDABOUT,
-                "roundabout exit maps to roundabout");
-        // 未知值按方向兜底：1=右、2=左
-        check(Maneuver.fromOrderTypeNew(60, 1) == Maneuver.RIGHT, "unknown falls back to side 1");
-        check(Maneuver.fromOrderTypeNew(60, 2) == Maneuver.LEFT, "unknown falls back to side 2");
+        // NaviOrderTypeNew 映射：高德转向图标编号（样本来自真机 42/200 实抓）
+        check(Maneuver.fromOrderTypeNew(1, -1) == Maneuver.STRAIGHT, "1 直行");
+        check(Maneuver.fromOrderTypeNew(2, 1) == Maneuver.LEFT, "2 左转");
+        check(Maneuver.fromOrderTypeNew(3, 1) == Maneuver.RIGHT, "3 右转");
+        check(Maneuver.fromOrderTypeNew(4, 1) == Maneuver.SLIGHT_LEFT, "4 左前方");
+        check(Maneuver.fromOrderTypeNew(5, -1) == Maneuver.SLIGHT_RIGHT, "5 右前方");
+        check(Maneuver.fromOrderTypeNew(6, -1) == Maneuver.SHARP_LEFT, "6 左后");
+        check(Maneuver.fromOrderTypeNew(7, 2) == Maneuver.SHARP_RIGHT, "7 右后");
+        check(Maneuver.fromOrderTypeNew(8, -1) == Maneuver.STRAIGHT, "8 直行变体");
+        check(Maneuver.fromOrderTypeNew(9, -1) == Maneuver.KEEP_LEFT, "9 靠左");
+        check(Maneuver.fromOrderTypeNew(10, -1) == Maneuver.KEEP_RIGHT, "10 靠右");
+        check(Maneuver.fromOrderTypeNew(19, -1) == Maneuver.UTURN, "19 掉头");
+        for (int exit = 11; exit <= 18; exit++) {
+            check(Maneuver.fromOrderTypeNew(exit, -1) == Maneuver.ROUNDABOUT,
+                    exit + " 环岛出口");
+        }
+        for (int ramp = 20; ramp <= 22; ramp++) {
+            check(Maneuver.fromOrderTypeNew(ramp, -1) == Maneuver.RAMP, ramp + " 匝道/出口");
+        }
+        for (int grade = 31; grade <= 39; grade++) {
+            check(Maneuver.fromOrderTypeNew(grade, -1) == Maneuver.LEFT, grade + " 左转分级");
+        }
+        for (int grade = 40; grade <= 51; grade++) {
+            check(Maneuver.fromOrderTypeNew(grade, -1) == Maneuver.RIGHT, grade + " 右转分级");
+        }
+        check(Maneuver.fromOrderTypeNew(60, 1) == Maneuver.RIGHT, "复合路口按 side 兜底");
+        check(Maneuver.fromOrderTypeNew(999, -1) == Maneuver.UNKNOWN, "999 未命中");
+        check(Maneuver.fromOrderTypeNew(1000, -1) == Maneuver.ARRIVE, "1000 推测为到达");
+        check(Maneuver.fromOrderTypeNew(12345, -1) == Maneuver.UNKNOWN, "表外取值");
         check(Maneuver.fromOrderTypeNew(-1, -1) == Maneuver.UNKNOWN, "no data is unknown");
 
         MediaText media = new MediaText();

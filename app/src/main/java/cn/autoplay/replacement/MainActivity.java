@@ -755,6 +755,52 @@ public final class MainActivity extends Activity {
         return service == null ? "连接服务未就绪，请返回首页稍候" : service.usbDiagnostics();
     }
 
+    /**
+     * 「高级功能 → MCU 大灯探测」：反射导出车机 MCU 的真实接口结构。
+     *
+     * <p>大灯联动能不能用取决于车机上 {@code com.chinatsp.mcumanager} 的实际形态，
+     * 而项目里的 mcuApi 只是推断的桩。这里把真实的类、方法、枚举常量都打出来，
+     * 同时写 logcat，便于在车机上直接定位名字/签名不一致的问题。
+     */
+    void showMcuProbe() {
+        ConnectionService service = connectionService;
+        android.util.Log.i("AutoPlayHeadlights", "用户触发 MCU 大灯探测");
+        if (service == null) {
+            new AlertDialog.Builder(this)
+                    .setTitle("MCU 大灯探测")
+                    .setMessage("连接服务未就绪，请返回首页稍候再试。")
+                    .setPositiveButton("知道了", null)
+                    .show();
+            return;
+        }
+        // 反射 + 一次 MCU 读取，放在后台线程避免卡住界面
+        new Thread(() -> {
+            String report;
+            try {
+                report = service.mcuProbeReport();
+            } catch (RuntimeException | LinkageError exception) {
+                report = "探测失败：" + exception;
+                android.util.Log.w("AutoPlayHeadlights", report, exception);
+            }
+            String text = report;
+            runOnUiThread(() -> new AlertDialog.Builder(this)
+                    .setTitle("MCU 大灯探测")
+                    .setMessage(text + "\n（同样内容已写入 logcat：AutoPlayHeadlights）")
+                    .setPositiveButton("知道了", null)
+                    .setNegativeButton("复制", (dialog, which) -> {
+                        android.content.ClipboardManager clipboard =
+                                (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                        if (clipboard != null) {
+                            clipboard.setPrimaryClip(
+                                    android.content.ClipData.newPlainText("MCU 探测", text));
+                            android.widget.Toast.makeText(this, "已复制到剪贴板",
+                                    android.widget.Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .show());
+        }, "autoplay-mcu-probe").start();
+    }
+
     private static String connectionStateLabel(int state) {
         switch (state) {
             case Ui.STATE_OK:

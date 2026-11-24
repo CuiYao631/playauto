@@ -54,7 +54,8 @@ public final class ConnectionService extends Service {
     }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final HeadlightNightMode headlightNightMode = new HeadlightNightMode(handler, this::onHeadlightChanged);
+    private final HeadlightNightMode headlightNightMode =
+            new HeadlightNightMode(this, handler, this::onHeadlightChanged);
     private final LocalBinder binder = new LocalBinder();
     private UsbManager usbManager;
     private UsbTransport connection;
@@ -940,8 +941,10 @@ public final class ConnectionService extends Service {
 
     void refreshSettings() {
         SharedPreferences prefs = prefs();
-        if (prefs.getInt("night_mode", 2) == 3) headlightNightMode.start();
+        boolean headlightLinked = prefs.getInt("night_mode", 2) == 3;
+        if (headlightLinked) headlightNightMode.start();
         else headlightNightMode.stop();
+        reportHeadlightState(headlightLinked);
         playback.setOutputGain(prefs.getInt("audio_output_gain", 100) / 100f);
         playback.setNavigationMediaGain(prefs.getInt("navigation_media_gain", 100) / 100f);
         capture.setGainDb(prefs.getInt("mic_gain_db", 0));
@@ -1388,6 +1391,44 @@ public final class ConnectionService extends Service {
     /** 设置页切换「大灯模拟」开关后调用。 */
     void refreshHeadlightTestOverlay() {
         updateHeadlightTestOverlay();
+    }
+
+    /** 「高级功能 → MCU 大灯探测」调用的反射报告。 */
+    String mcuProbeReport() {
+        return headlightNightMode.probe();
+    }
+
+    /** 上次写入连接详情的大灯状态说明，避免重复记录刷满诊断缓冲。 */
+    private String lastHeadlightDiagnostic = "";
+    /** 上一次检查时大灯联动是否不可用，用于记录「恢复可用」。 */
+    private boolean headlightWasUnavailable;
+
+    /**
+     * 把大灯联动是否真的可用写进「连接详情」。
+     *
+     * <p>拿不到 MCU 状态是「夜间模式不动」最常见的原因，但表现是完全静默的：
+     * 没有异常弹窗，盒子也收不到指令。这里显式留档，用户在设置页就能看到结论，
+     * 不必连 adb。
+     */
+    private void reportHeadlightState(boolean linked) {
+        if (linked && !headlightNightMode.mcuAvailable()) {
+            String error = headlightNightMode.bindError();
+            String message = "大灯联动不可用："
+                    + (error.isEmpty() ? "尚未绑定车机 MCU" : error)
+                    + "（夜间模式不会随大灯变化；可在「调试 → MCU 大灯探测」查看原因）";
+            if (!message.equals(lastHeadlightDiagnostic)) {
+                lastHeadlightDiagnostic = message;
+                Log.w(TAG, message);
+                recordDiagnostic(message);
+            }
+            headlightWasUnavailable = true;
+            return;
+        }
+        if (headlightWasUnavailable) {
+            headlightWasUnavailable = false;
+            lastHeadlightDiagnostic = "";
+            recordDiagnostic(linked ? "大灯联动已就绪：已连上车机 MCU" : "大灯联动已关闭");
+        }
     }
 
     /** 伪造一次大灯状态，走与真实大灯完全相同的回调链路。 */

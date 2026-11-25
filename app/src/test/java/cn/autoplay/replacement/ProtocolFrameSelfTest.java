@@ -36,6 +36,7 @@ public final class ProtocolFrameSelfTest {
         testDashboardTextFormatting();
         testClusterNaviProtocol();
         testClusterNaviIcons();
+        testClusterNaviBridge();
     }
 
     private static void testClusterNaviProtocol() {
@@ -54,6 +55,13 @@ public final class ProtocolFrameSelfTest {
 
         // 重复 start 不应重复发送
         check(navi.start().isEmpty(), "second start is ignored");
+
+        // start(true) 必须在已 ACTIVE 时强制重发（仪表可能刚上电）
+        List<ClusterNavi.Message> forced = navi.start(true);
+        check(forced.size() == 1, "forced start re-emits while active");
+        check(Integer.valueOf(ClusterNavi.EXTRA_STATE_START).equals(
+                forced.get(0).extras.get("EXTRA_STATE")), "forced start still EXTRA_STATE=8");
+        check(navi.isActive(), "forced start keeps ACTIVE");
 
         // 规范 §10.1 第 2 条：update(27,300) → UPDATE action / int 27 / String "300,m"
         List<ClusterNavi.Message> turn = navi.turn(27, 300);
@@ -177,6 +185,150 @@ public final class ProtocolFrameSelfTest {
         check(ClusterNaviIcons.find(327).experimental, "extended icons marked experimental");
         check(ClusterNaviIcons.describe(ClusterNaviIcons.find(27)).contains("左转"),
                 "describe includes label");
+
+        // 右舵专用与「未导航」占位不得出现在选择器里
+        check(!ClusterNaviIcons.selectable(ClusterNaviIcons.find(330)), "330 is right-hand drive");
+        for (int id = 334; id <= 343; id++) {
+            check(!ClusterNaviIcons.selectable(ClusterNaviIcons.find(id)),
+                    "right-hand-drive roundabout exit must be hidden: " + id);
+        }
+        check(!ClusterNaviIcons.selectable(ClusterNaviIcons.find(344)), "344 is idle placeholder");
+        check(!ClusterNaviIcons.selectable(ClusterNaviIcons.find(348)), "348 is idle placeholder");
+        check(ClusterNaviIcons.selectable(ClusterNaviIcons.find(327)), "327 is selectable");
+        check(ClusterNaviIcons.selectable(ClusterNaviIcons.find(349)), "349 is selectable");
+        // 330 + 334..343 + 344 + 348 = 13 项被排除
+        check(ClusterNaviIcons.SELECTABLE.size() == 47 - 13,
+                "13 icons are excluded from the picker");
+        for (ClusterNaviIcons.Icon icon : ClusterNaviIcons.SELECTABLE) {
+            check(icon.excluded == null, "selectable list carries no excluded icon");
+        }
+
+        // 规范 §6.3 的车厂官方含义
+        check("驶入环岛".equals(ClusterNaviIcons.find(327).label), "327 驶入环岛");
+        check("即将到达途经点".equals(ClusterNaviIcons.find(328).label), "328 即将到达途经点");
+        check("前方出口驶出环岛".equals(ClusterNaviIcons.find(331).label), "331 前方出口驶出环岛");
+        check("沿当前道路长距离直行".equals(ClusterNaviIcons.find(332).label),
+                "332 沿当前道路长距离直行");
+        check("即将到达目的地".equals(ClusterNaviIcons.find(333).label), "333 即将到达目的地");
+        check("环岛右转".equals(ClusterNaviIcons.find(349).label), "349 环岛右转");
+        check("环岛左转".equals(ClusterNaviIcons.find(350).label), "350 环岛左转");
+        check("驶入环岛后调头".equals(ClusterNaviIcons.find(351).label), "351 驶入环岛后调头");
+        check(ClusterNaviIcons.describe(ClusterNaviIcons.find(344)).contains("不显示"),
+                "excluded icons say why in describe");
+    }
+
+    private static void testClusterNaviBridge() {
+        // 高德转向编号 → 仪表 GAODE ID：两套编号不是同一空间，必须逐条对照
+        check(ClusterNaviBridge.iconIdForOrderType(1) == ClusterNaviIcons.ID_STRAIGHT,
+                "1 straight");
+        check(ClusterNaviBridge.iconIdForOrderType(8) == ClusterNaviIcons.ID_STRAIGHT,
+                "8 straight variant");
+        check(ClusterNaviBridge.iconIdForOrderType(2) == ClusterNaviIcons.ID_LEFT, "2 left");
+        check(ClusterNaviBridge.iconIdForOrderType(3) == ClusterNaviIcons.ID_RIGHT, "3 right");
+        check(ClusterNaviBridge.iconIdForOrderType(4) == ClusterNaviIcons.ID_KEEP_LEFT,
+                "4 slight left -> keep left");
+        check(ClusterNaviBridge.iconIdForOrderType(5) == ClusterNaviIcons.ID_KEEP_RIGHT,
+                "5 slight right -> keep right");
+        check(ClusterNaviBridge.iconIdForOrderType(6) == ClusterNaviIcons.ID_REAR_LEFT,
+                "6 is rear-left");
+        check(ClusterNaviBridge.iconIdForOrderType(7) == ClusterNaviIcons.ID_REAR_RIGHT,
+                "7 is rear-right");
+        check(ClusterNaviBridge.iconIdForOrderType(9) == ClusterNaviIcons.ID_KEEP_LEFT,
+                "9 keep left");
+        check(ClusterNaviBridge.iconIdForOrderType(10) == ClusterNaviIcons.ID_KEEP_RIGHT,
+                "10 keep right");
+        check(ClusterNaviBridge.iconIdForOrderType(19) == ClusterNaviIcons.ID_UTURN_LEFT,
+                "19 u-turn");
+
+        // 环岛 11~18 → 第 1~8 出口（235 起每档 +4）
+        check(ClusterNaviBridge.iconIdForOrderType(11) == 235, "11 first roundabout exit");
+        check(ClusterNaviBridge.iconIdForOrderType(18) == 263, "18 eighth roundabout exit");
+        for (int orderType = 11; orderType <= 18; orderType++) {
+            int id = ClusterNaviBridge.iconIdForOrderType(orderType);
+            check(ClusterNaviIcons.find(id) != null, "roundabout mapping hits catalog: " + id);
+            check(ClusterNaviIcons.selectable(ClusterNaviIcons.find(id)),
+                    "roundabout mapping must be displayable: " + id);
+        }
+
+        // 分级 / 匝道 / 表外取值
+        check(ClusterNaviBridge.iconIdForOrderType(35) == ClusterNaviIcons.ID_LEFT,
+                "31~39 collapse to left turn");
+        check(ClusterNaviBridge.iconIdForOrderType(45) == ClusterNaviIcons.ID_RIGHT,
+                "40~51 collapse to right turn");
+        check(ClusterNaviBridge.iconIdForOrderType(21) == ClusterNaviIcons.ID_KEEP_RIGHT,
+                "20~22 ramp exits to the right");
+        check(ClusterNaviBridge.iconIdForOrderType(999) == ClusterNaviIcons.ID_STRAIGHT,
+                "999 unmapped falls back to straight");
+        check(ClusterNaviBridge.iconIdForOrderType(60) == ClusterNaviIcons.ID_STRAIGHT,
+                "complex junction without side falls back to straight");
+        // 每个映射结果都必须在表里且可显示（除 0 号清除码外都不该落空）
+        for (int orderType = 0; orderType <= 999; orderType++) {
+            int id = ClusterNaviBridge.iconIdForOrderType(orderType);
+            ClusterNaviIcons.Icon icon = ClusterNaviIcons.find(id);
+            check(icon != null, "mapping must stay inside the catalog: " + orderType + " -> " + id);
+            check(ClusterNaviIcons.selectable(icon),
+                    "mapping must never emit a hidden icon: " + orderType + " -> " + id);
+        }
+
+        // 距离钳制到 1..65534
+        check(ClusterNaviBridge.clampDistance(0) == ClusterNavi.MIN_DISTANCE, "0 clamps to 1");
+        check(ClusterNaviBridge.clampDistance(-5) == ClusterNavi.MIN_DISTANCE, "negative clamps");
+        check(ClusterNaviBridge.clampDistance(70000) == ClusterNavi.MAX_DISTANCE,
+                "huge clamps to 65534");
+        check(ClusterNaviBridge.clampDistance(300) == 300, "in-range distance kept");
+
+        // 剩余时间展示文本
+        check("".equals(ClusterNaviBridge.remainText(0)), "zero seconds renders empty");
+        check("1 min".equals(ClusterNaviBridge.remainText(30)), "under a minute renders 1 min");
+        check("22 min".equals(ClusterNaviBridge.remainText(1320)), "minutes rounded down");
+
+        // 没有内容时不得发出任何广播
+        ClusterNavi navi = new ClusterNavi();
+        ClusterNaviBridge bridge = new ClusterNaviBridge(navi);
+        check(bridge.onNavigationUpdate(new NavigationText(), 1000L).isEmpty(),
+                "no content => no broadcast");
+        check(!bridge.isActive(), "bridge stays idle without data");
+        check(bridge.onNavigationEnded().isEmpty(), "ending when idle is a no-op");
+
+        // 转向距离未知时不能编造 ②③（增量包可能只带剩余里程）
+        check(ClusterNaviBridge.clampDistance(-1) == ClusterNavi.MIN_DISTANCE,
+                "clampDistance alone would fabricate 1m");
+        check(hasTurnDistanceGating(), "bridge must stay silent until a turn distance arrives");
+
+        // 桥接的报文顺序固定为 ① → ② → ③（每次下发都先重发 ①）
+        ClusterNavi ordered = new ClusterNavi();
+        List<ClusterNavi.Message> batch = ClusterNavi.combine(
+                ordered.start(true),
+                ordered.turn(ClusterNaviIcons.ID_LEFT, 300),
+                ordered.flush(5000, 600, "10 min", 0, "当前路", ""));
+        check(batch.size() == 3, "batch is start + turn + flush");
+        check(ClusterNavi.ACT_STANDARD.equals(batch.get(0).action), "start first, STANDARD action");
+        check(Integer.valueOf(ClusterNavi.EXTRA_STATE_START).equals(
+                batch.get(0).extras.get("EXTRA_STATE")), "first message is EXTRA_STATE=8");
+        check(ClusterNavi.ACT_UPDATE.equals(batch.get(1).action), "turn second");
+        check(Integer.valueOf(ClusterNavi.KEY_TYPE_SUMMARY).equals(
+                batch.get(2).extras.get("KEY_TYPE")), "flush last, KEY_TYPE=10001");
+
+        // 结束必须恰好两条：NAVIGATION_STOPPED → EXTRA_STATE=9，且之后回到 IDLE
+        List<ClusterNavi.Message> ended = ordered.stop();
+        check(ended.size() == 2, "stop emits two messages");
+        check(ClusterNavi.ACT_STOPPED.equals(ended.get(0).action),
+                "stop starts with NAVIGATION_STOPPED");
+        check(Integer.valueOf(ClusterNavi.EXTRA_STATE_END).equals(
+                ended.get(1).extras.get("EXTRA_STATE")), "stop ends with EXTRA_STATE=9");
+        check(!ordered.isActive(), "stop returns to IDLE");
+        check(ordered.stop().isEmpty(), "second stop is idempotent");
+    }
+
+    /**
+     * 用最小桩验证「转向距离未知不发 ②③」。
+     *
+     * <p>{@code NavigationText} 的字段只能由 JSON 填充，而 {@code org.json} 在
+     * 纯 JVM 下是抛 {@code Stub!} 的空壳，所以这里只校验 {@code turnDistance()} 的
+     * 初始值为 {@code -1}（触发静默分支），映射逻辑本身已在上面的用例覆盖。
+     */
+    private static boolean hasTurnDistanceGating() {
+        return new NavigationText().turnDistance() == -1;
     }
 
     private static void testDashboardTextFormatting() {

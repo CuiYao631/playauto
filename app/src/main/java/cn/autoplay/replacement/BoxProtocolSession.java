@@ -267,6 +267,11 @@ public final class BoxProtocolSession implements AutoCloseable {
     private int phonePhase = -1;
     private int microphoneDecodeType = -1;
     private boolean microphoneRequested;
+    /**
+     * 本次会话见过的音频流，键为 {@code (decodeType << 8) | audioType}。
+     * 只用于诊断日志，见 {@link #noteAudioStream}。
+     */
+    private final java.util.Map<Integer, Long> audioStreamsSeen = new java.util.HashMap<>();
     private Thread worker;
     private int nonce;
     private volatile CarLogoSelection selectedCarLogo;
@@ -836,6 +841,39 @@ public final class BoxProtocolSession implements AutoCloseable {
                 .array();
     }
 
+    /** 十六进制转储，仅用于诊断日志（上限 64 B，避免刷屏）。 */
+    static String hex(byte[] data) {
+        if (data == null) return "";
+        int limit = Math.min(data.length, 64);
+        StringBuilder text = new StringBuilder(limit * 3);
+        for (int i = 0; i < limit; i++) {
+            if (i > 0) text.append(' ');
+            int value = data[i] & 0xFF;
+            if (value < 0x10) text.append('0');
+            text.append(Integer.toHexString(value));
+        }
+        if (data.length > limit) text.append(" …(").append(data.length).append(" B)");
+        return text.toString();
+    }
+
+    /**
+     * 诊断音频流的上下线：只在出现<b>新的</b> {@code (decodeType, audioType)}
+     * 组合时打一行 logcat。
+     *
+     * <p>盒子在导航语音播报期间才会开辟「导航提示音」通道，这条日志用来把
+     * {@code CMD 8 / 506 → 507} 的时间窗和音频解码类型对上：
+     * 若窗口内只出现 {@code decodeType=5/6/7}（语音类），说明 506/507 是
+     * 语音播报开关而非导航起止。
+     */
+    private void noteAudioStream(int decodeType, int audioType, int payloadLength) {
+        int key = (decodeType << 8) | (audioType & 0xFF);
+        Long previous = audioStreamsSeen.put(key, SystemClock.elapsedRealtime());
+        if (previous != null) return;
+        Log.i(TAG, "CMD 7 新音频流 decodeType=" + decodeType + " audioType=" + audioType
+                + "（" + (payloadLength - AudioFrame.HEADER_SIZE) + " B PCM）"
+                + "；本次会话已见 " + audioStreamsSeen.size() + " 路");
+    }
+
     static String describeFirmwareStatus(int status) {
         switch (status) {
             case 1: return "开始升级";
@@ -1143,6 +1181,7 @@ public final class BoxProtocolSession implements AutoCloseable {
         ByteBuffer header = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
         int decodeType = header.getInt(0);
         int audioType = header.getInt(8);
+        noteAudioStream(decodeType, audioType, payload.length);
         if (payload.length == AudioFrame.HEADER_SIZE + 4) {
             // The original protocol uses a float volume transition, not a control byte.
             return;
@@ -1159,8 +1198,10 @@ public final class BoxProtocolSession implements AutoCloseable {
                         + "，音频类型=" + audioType + "，解码类型=" + decodeType);
             }
             if (control == 2 && listener != null) {
+                Log.i(TAG, "CMD 7 音频流停止 decodeType=" + decodeType + " audioType=" + audioType);
                 listener.onAudioStreamStopped(decodeType, audioType);
             } else if (control == 3) {
+                Log.i(TAG, "CMD 7 麦克风流开始 decodeType=" + decodeType + " audioType=" + audioType);
                 microphoneDecodeType = decodeType;
                 if (microphoneRequested && listener != null) {
                     listener.onMicrophoneStart(microphoneDecodeType);
@@ -1500,7 +1541,15 @@ public final class BoxProtocolSession implements AutoCloseable {
         // 导航/播放状态全在这条命令里，且只在应用内日志窗口可见；
         // 500 以上（导航起止、蓝牙/Wi-Fi、自动连接）低频，直接落 logcat 便于 adb 判定
         if (subcommand >= 500) {
-            Log.i(TAG, "CMD 8 子命令=" + subcommand);
+            if (subcommand == 506 || subcommand == 507) {
+                // 506/507 的实际语义尚未定论（可能是「导航开始/结束」，也可能是
+                // 「导航语音播报音频通道开关」）。连负载一起打印，
+                // 便于用"是否有音频帧"和"负载长度"两条线索一起判定。
+                Log.i(TAG, "CMD 8 子命令=" + subcommand + " 负载 " + payload.length
+                        + " B" + (payload.length > 4 ? "：" + hex(payload) : "（仅 4 B 子命令）"));
+            } else {
+                Log.i(TAG, "CMD 8 子命令=" + subcommand);
+            }
         }
         if (subcommand == 1) {
             microphoneRequested = true;

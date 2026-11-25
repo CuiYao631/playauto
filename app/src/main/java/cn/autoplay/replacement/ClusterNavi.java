@@ -64,14 +64,26 @@ final class ClusterNavi {
     /**
      * ① 开始导航。
      *
+     * @param force 为 {@code true} 时即使已经 ACTIVE 也重发
+     *              （车机仪表可能刚上电，错过了最初那一次就永远不会显示）
+     * @return 待发送的消息；已 ACTIVE 且未强制重发时返回空列表
+     */
+    List<Message> start(boolean force) {
+        boolean alreadyActive = active;
+        active = true;
+        if (alreadyActive && !force) {
+            return Collections.emptyList();
+        }
+        return Collections.singletonList(stateMessage(EXTRA_STATE_START));
+    }
+
+    /**
+     * ① 开始导航（已 ACTIVE 时不重复发送）。
+     *
      * @return 待发送的消息；重复调用返回空列表（already active）
      */
     List<Message> start() {
-        if (active) {
-            return Collections.emptyList();
-        }
-        active = true;
-        return Collections.singletonList(stateMessage(EXTRA_STATE_START));
+        return start(false);
     }
 
     /**

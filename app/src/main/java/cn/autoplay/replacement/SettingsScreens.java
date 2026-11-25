@@ -73,8 +73,24 @@ final class SettingsScreens {
     private TextView advancedRootStatus;
     private TextView advancedUsbStatus;
 
-    /** 仪表导航调试的协议状态机；随 SettingsScreens 存活，跨页面重建保留。 */
-    private final ClusterNavi clusterNavi = new ClusterNavi();
+    /**
+     * 仪表导航调试用的状态机。
+     *
+     * <p>优先复用 {@link ConnectionService} 里的共享实例：自动桥接和手工调试
+     * 必须看到同一个 {@code active} 状态，否则手工点过 ① 之后自动逻辑会重复发 ①。
+     * 服务未就绪（未连接）时退回本地实例，页面仍可操作。
+     */
+    private ClusterNavi clusterNaviInstance;
+
+    private ClusterNavi clusterNavi() {
+        ClusterNavi shared = host.clusterNavi();
+        if (shared != null) {
+            clusterNaviInstance = shared;
+        } else if (clusterNaviInstance == null) {
+            clusterNaviInstance = new ClusterNavi();
+        }
+        return clusterNaviInstance;
+    }
     /** 当前选中的仪表图标 ID，默认左转（规范 §6.1，已实车验证）。 */
     private int clusterNaviIconId = 27;
     private TextView clusterNaviStatus;
@@ -378,6 +394,29 @@ final class SettingsScreens {
      * 完整的 ①→②③→④ 序列，并按 §8 加状态机保护。
      */
     private void buildClusterNaviDebugSection() {
+        section("仪表自动同步");
+        Switch autoSwitch = new Switch(host);
+        autoSwitch.setChecked(prefs().getBoolean(ConnectionService.PREF_CLUSTER_NAVI_AUTO, true));
+        autoSwitch.setText("把盒子导航数据自动转发到仪表");
+        autoSwitch.setTextSize(14);
+        autoSwitch.setTextColor(Ui.TEXT);
+        autoSwitch.setOnCheckedChangeListener((button, checked) -> {
+            prefs().edit()
+                    .putBoolean(ConnectionService.PREF_CLUSTER_NAVI_AUTO, checked)
+                    .apply();
+            setClusterNaviMessage(checked
+                    ? "已开启：收到盒子导航数据后自动发 ①→②③，导航结束时自动发 ④。"
+                    : "已关闭：只响应下面的手动按钮。", Ui.TEXT_SECONDARY);
+        });
+        LinearLayout autoRow = Ui.card(host);
+        autoRow.addView(autoSwitch);
+        TextView autoHint = Ui.text(host,
+                "图标与距离来自盒子 CMD 42 / 200 的 NaviOrderTypeNew 与 NaviRemainDistance，"
+                        + "每秒最多下发一次，内容没变不重发。", 12, Ui.TEXT_SECONDARY, false);
+        autoHint.setPadding(dp(8), 0, dp(8), dp(8));
+        autoRow.addView(autoHint);
+        list.addView(autoRow);
+
         section("仪表手动测试");
         TextView warning = Ui.text(host, "仅在车辆停稳时测试。这是向原车仪表投送导航，"
                 + "与上面的副屏记录无关，也不需要连接盒子。\n"
@@ -398,7 +437,7 @@ final class SettingsScreens {
 
         addRow(clusterNaviButton("原车组件自检", false, view -> checkClusterComponents()));
         addRow(clusterNaviButton("① 开始导航（EXTRA_STATE=8）", true, view -> {
-            sendClusterMessages(host, clusterNavi.start(), "① 开始导航");
+            sendClusterMessages(host, clusterNavi().start(), "① 开始导航");
             refreshClusterNaviStatus();
         }));
 
@@ -427,7 +466,7 @@ final class SettingsScreens {
                 view -> sendClusterTurnAndFlush()));
         addRow(clusterNaviButton("④ 结束导航（清除图标）", false,
                 view -> {
-                    sendClusterMessages(host, clusterNavi.stop(), "④ 结束导航");
+                    sendClusterMessages(host, clusterNavi().stop(), "④ 结束导航");
                     refreshClusterNaviStatus();
                 }));
         addRow(clusterNaviButton("退出导航（EXTRA_STATE=2，可选）", false, view -> {
@@ -459,6 +498,11 @@ final class SettingsScreens {
                     android.widget.Toast.LENGTH_SHORT).show();
             return;
         }
+        if (!ClusterNaviIcons.selectable(icon)) {
+            setClusterNaviMessage(icon.label + "（ID " + icon.id + "）不显示："
+                    + icon.excluded + "，请换一个图标。", Ui.WARNING);
+            return;
+        }
         int distance;
         try {
             distance = Integer.parseInt(clusterNaviDistance.getText().toString().trim());
@@ -467,15 +511,15 @@ final class SettingsScreens {
                     Ui.WARNING);
             return;
         }
-        if (!clusterNavi.isActive()) {
+        if (!clusterNavi().isActive()) {
             setClusterNaviMessage("未开始导航，已忽略。请先点 ① 开始导航。", Ui.WARNING);
             return;
         }
         List<ClusterNavi.Message> messages;
         try {
             messages = ClusterNavi.combine(
-                    clusterNavi.turn(iconId, distance),
-                    clusterNavi.flush(distance, 0, "", 0, "", ""));
+                    clusterNavi().turn(iconId, distance),
+                    clusterNavi().flush(distance, 0, "", 0, "", ""));
         } catch (IllegalArgumentException exception) {
             setClusterNaviMessage(exception.getMessage(), Ui.WARNING);
             return;
@@ -487,10 +531,11 @@ final class SettingsScreens {
     }
 
     private void showClusterIconPicker() {
-        String[] labels = new String[ClusterNaviIcons.ALL.size()];
+        List<ClusterNaviIcons.Icon> icons = ClusterNaviIcons.SELECTABLE;
+        String[] labels = new String[icons.size()];
         int checked = 0;
         for (int index = 0; index < labels.length; index++) {
-            ClusterNaviIcons.Icon icon = ClusterNaviIcons.ALL.get(index);
+            ClusterNaviIcons.Icon icon = icons.get(index);
             labels[index] = ClusterNaviIcons.describe(icon);
             if (icon.id == clusterNaviIconId) {
                 checked = index;
@@ -499,7 +544,7 @@ final class SettingsScreens {
         new AlertDialog.Builder(host)
                 .setTitle("选择转向图标（规范 §6）")
                 .setSingleChoiceItems(labels, checked, (dialog, which) -> {
-                    clusterNaviIconId = ClusterNaviIcons.ALL.get(which).id;
+                    clusterNaviIconId = icons.get(which).id;
                     dialog.dismiss();
                     refreshClusterNaviStatus();
                 })
@@ -608,20 +653,30 @@ final class SettingsScreens {
                     : icon.label + " · ID " + icon.id);
         }
         if (clusterNaviStateLabel != null) {
-            clusterNaviStateLabel.setText(clusterNavi.isActive() ? "导航中（可发 ②③）" : "未开始");
-            clusterNaviStateLabel.setTextColor(clusterNavi.isActive() ? Ui.ACCENT : Ui.TEXT_SECONDARY);
+            clusterNaviStateLabel.setText(clusterNavi().isActive() ? "导航中（可发 ②③）" : "未开始");
+            clusterNaviStateLabel.setTextColor(clusterNavi().isActive() ? Ui.ACCENT : Ui.TEXT_SECONDARY);
         }
         if (clusterNaviStatus != null && clusterNaviStatus.getText().length() == 0) {
             setClusterNaviMessage("尚未发送。顺序：① → ②③ → ④。", Ui.TEXT_SECONDARY);
         }
     }
 
-    /** Activity 销毁时按规范 §1/§8.4 调用：幂等的 {@code stop()}。 */
+    /**
+     * Activity 销毁时的仪表收尾。
+     *
+     * <p>状态机现在由 {@link ConnectionService} 持有（盒子断开时才真正结束导航），
+     * <b>不能</b>在这里 {@code stop()}：那会让每次退出界面都把仪表清掉，而导航还在继续。
+     *
+     * <p>只有在拿到的是本地兜底实例（服务未就绪）时才需要显式收尾，避免仪表停住。
+     */
     void releaseClusterNavi() {
-        if (!clusterNavi.isActive()) {
+        if (host.clusterNavi() != null) {
             return;
         }
-        List<ClusterNavi.Message> messages = clusterNavi.stop();
+        if (!clusterNavi().isActive()) {
+            return;
+        }
+        List<ClusterNavi.Message> messages = clusterNavi().stop();
         for (ClusterNavi.Message message : messages) {
             Intent intent = new Intent(message.action);
             for (Map.Entry<String, Object> entry : message.extras.entrySet()) {

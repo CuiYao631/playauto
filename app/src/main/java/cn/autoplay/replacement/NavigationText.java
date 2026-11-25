@@ -67,6 +67,31 @@ final class NavigationText {
         return endPending;
     }
 
+    /** 路口距离（米）；{@code -1} 表示未下发。 */
+    int turnDistance() {
+        return turnDistance;
+    }
+
+    /** 到目的地剩余里程（米）；{@code -1} 表示未下发。 */
+    int destinationDistance() {
+        return destinationDistance;
+    }
+
+    /** 到目的地剩余时间（秒）；{@code -1} 表示未下发。 */
+    int destinationSeconds() {
+        return destinationSeconds;
+    }
+
+    /** 当前道路名，未下发时为空串。 */
+    String roadName() {
+        return road;
+    }
+
+    /** 高德转向图标编号；{@code -1} 表示未下发。 */
+    int orderTypeNew() {
+        return orderTypeNew;
+    }
+
     void update(JSONObject data) {
         update(data, System.currentTimeMillis());
     }

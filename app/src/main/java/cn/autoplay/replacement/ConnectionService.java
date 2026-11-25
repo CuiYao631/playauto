@@ -34,6 +34,8 @@ import java.util.List;
 /** Owns the USB session and audio independently of the projection Activity. */
 public final class ConnectionService extends Service {
     static final String PREFERENCE = "background_connection";
+    /** 「自动把盒子导航数据转发到仪表」开关，默认开启。 */
+    static final String PREF_CLUSTER_NAVI_AUTO = "cluster_navi_auto";
     private static final String TAG = "AutoPlayConnection";
     private static final String USB_PERMISSION = "cn.autoplay.replacement.USB_PERMISSION";
     private static final String MANAGE_USB = "android.permission.MANAGE_USB";
@@ -1501,8 +1503,24 @@ public final class ConnectionService extends Service {
     private final java.util.ArrayDeque<String> navigationLog = new java.util.ArrayDeque<>();
     private final NavigationText navigationText = new NavigationText();
     private final MediaText mediaText = new MediaText();
-    /** 导航结束后延迟刷新副屏文字（防抖）。 */
-    private final Runnable dashboardTextRefresh = this::pushDashboardText;
+    /**
+     * 盒子导航数据 → 原车仪表广播的自动桥接。
+     *
+     * <p>与设置页手工调试共用同一份 {@link ClusterNavi} 状态机，所以在调试页
+     * 手动发过 ① 之后，自动逻辑会直接续着发 ②③ 而不会重复发 ①。
+     */
+    private final ClusterNavi clusterNavi = new ClusterNavi();
+    private final ClusterNaviBridge clusterNaviBridge = new ClusterNaviBridge(clusterNavi);
+    /**
+     * 导航结束防抖后的统一刷新：副屏文字 + 仪表收尾。
+     *
+     * <p>盒子经常不发 507，{@code NaviStatus=0} 也可能被防抖吞掉，所以「确认结束」
+     * 要落在这个防抖回调上，光靠新数据包到达是等不到的（盒子停了就再也没有包）。
+     */
+    private final Runnable dashboardTextRefresh = () -> {
+        pushDashboardText();
+        publishToCluster(System.currentTimeMillis());
+    };
     /** 上一次推送到副屏的文字摘要，只在变化时记日志。 */
     private String lastDashboardTextLog = "";
 
@@ -1521,13 +1539,31 @@ public final class ConnectionService extends Service {
     }
 
     private void clearNavigationState(String message) {
+        // 盒子断开或换了一轮手机会话：先把仪表上的导航收掉，避免永远停在最后一个图标
+        finishClusterNavi();
         navigationText.clear(message);
+        clusterNaviBridge.reset();
         pushDashboardText();
     }
 
+    /**
+     * ④ 结束仪表导航（幂等，未开始时是空操作）。
+     *
+     * <p>盒子断开（拔线、USB 抖动、会话异常结束）时必须调用：仪表那边没人告诉它
+     * 导航结束了，会永远停在最后一个图标和距离上。
+     *
+     * <p><b>不受「自动同步」开关控制</b>：留下一个假图标比多发一条广播更糟，
+     * 而且这条广播只在确实处于导航中（{@link ClusterNaviBridge#isActive()}）时才真正发出。
+     */
+    void finishClusterNavi() {
+        sendClusterMessages(clusterNaviBridge.onNavigationEnded(), "结束导航（会话结束）");
+    }
+
     private void updateNavigationText(org.json.JSONObject data) {
-        navigationText.update(data, System.currentTimeMillis());
+        long now = System.currentTimeMillis();
+        navigationText.update(data, now);
         pushDashboardText();
+        publishToCluster(now);
         if (navigationText.endPending()) {
             // 盒子进入结束态后再次刷新一次，让防抖后的清空真正生效
             handler.removeCallbacks(dashboardTextRefresh);
@@ -1535,6 +1571,64 @@ public final class ConnectionService extends Service {
                     NavigationText.CLEAR_DEBOUNCE_MS + 200);
         }
         if (client != null) client.onNavigationLogChanged();
+    }
+
+    /** 把当前导航状态同步给原车仪表（①②③④ 由 {@link ClusterNaviBridge} 决定）。 */
+    private void publishToCluster(long now) {
+        if (!prefs().getBoolean(PREF_CLUSTER_NAVI_AUTO, true)) {
+            return;
+        }
+        // 先判「确认结束」：否则下面的 update 会先补一条 ①，紧接着又被 ④ 收掉，
+        // 形成 ①→④ 抖动。
+        if (clusterNaviBridge.isActive() && !navigationText.shouldShow(now)) {
+            sendClusterMessages(clusterNaviBridge.onNavigationEnded(), "导航结束");
+            return;
+        }
+        sendClusterMessages(clusterNaviBridge.onNavigationUpdate(navigationText, now),
+                "自动同步");
+    }
+
+    /**
+     * 发送一批仪表广播。
+     *
+     * <p>{@code putExtra} 必须传<b>基本类型 int</b>：传装箱的 {@code Integer} 会走
+     * {@code Serializable} 重载，原车用 {@code getIntExtra} 读会拿到默认值，
+     * 表现为「发出去了但没反应」（规范 §2.2）。
+     */
+    private void sendClusterMessages(List<ClusterNavi.Message> messages, String reason) {
+        if (messages.isEmpty()) {
+            return;
+        }
+        StringBuilder text = new StringBuilder();
+        for (ClusterNavi.Message message : messages) {
+            android.content.Intent intent = new android.content.Intent(message.action);
+            for (java.util.Map.Entry<String, Object> entry : message.extras.entrySet()) {
+                Object value = entry.getValue();
+                if (value instanceof Integer) {
+                    intent.putExtra(entry.getKey(), ((Integer) value).intValue());
+                } else {
+                    intent.putExtra(entry.getKey(), String.valueOf(value));
+                }
+            }
+            try {
+                sendBroadcast(intent);
+                text.append(message).append('\n');
+            } catch (RuntimeException exception) {
+                Log.e(TAG, "仪表导航广播失败：" + message.action, exception);
+                return;
+            }
+        }
+        Log.i("AutoPlayClusterNavi", reason + " → " + text);
+    }
+
+    /**
+     * 共享的仪表导航状态机。
+     *
+     * <p>设置页的「仪表导航调试」用它发手工报文，自动桥接用同一实例，
+     * 避免手工点过 ① 之后自动逻辑又重复发一次 ①。
+     */
+    ClusterNavi clusterNavi() {
+        return clusterNavi;
     }
 
     private void updateMediaText(org.json.JSONObject data) {

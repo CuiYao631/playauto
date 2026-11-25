@@ -378,7 +378,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        // 规范 §8.4：Activity 销毁前必须结束仪表导航，否则仪表会停在最后一次转向
+        // 仪表导航状态由 ConnectionService 持有，Activity 销毁不代表导航结束；
+        // 只有服务未就绪时的本地兜底状态才需要在退出时收尾
         if (screens != null) {
             screens.releaseClusterNavi();
         }
@@ -1073,6 +1074,12 @@ public final class MainActivity extends Activity {
     }
     void showNavigationLog() {
         showSettingsPageOf(PAGE_NAVIGATION);
+    }
+
+    /** 供设置页的仪表导航调试复用服务里的状态机；未连接时返回 {@code null}。 */
+    ClusterNavi clusterNavi() {
+        ConnectionService service = connectionService;
+        return service == null ? null : service.clusterNavi();
     }
 
     String navigationLogText() {

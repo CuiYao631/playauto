@@ -37,6 +37,7 @@ public final class ProtocolFrameSelfTest {
         testClusterNaviProtocol();
         testClusterNaviIcons();
         testClusterNaviBridge();
+        testVehicleComponents();
     }
 
     private static void testClusterNaviProtocol() {
@@ -215,6 +216,93 @@ public final class ProtocolFrameSelfTest {
         check("驶入环岛后调头".equals(ClusterNaviIcons.find(351).label), "351 驶入环岛后调头");
         check(ClusterNaviIcons.describe(ClusterNaviIcons.find(344)).contains("不显示"),
                 "excluded icons say why in describe");
+    }
+
+    private static void testVehicleComponents() {
+        // 三态归类
+        check(VehicleComponents.classify(false, false) == VehicleComponents.Presence.MISSING,
+                "not installed => MISSING");
+        check(VehicleComponents.classify(false, true) == VehicleComponents.Presence.MISSING,
+                "installed flag wins over enabled flag");
+        check(VehicleComponents.classify(true, true) == VehicleComponents.Presence.PRESENT,
+                "installed+enabled => PRESENT");
+        check(VehicleComponents.classify(true, false) == VehicleComponents.Presence.DISABLED,
+                "installed but disabled => DISABLED");
+        check("未安装".equals(VehicleComponents.describe(VehicleComponents.Presence.MISSING)),
+                "MISSING text");
+        check("已安装但被禁用".equals(
+                VehicleComponents.describe(VehicleComponents.Presence.DISABLED)),
+                "DISABLED text");
+
+        // 语音包名必须与禁用开关用的是同一份常量，不能各写一个字符串
+        check(VehicleComponents.VOICE_KEY_PACKAGE.equals(VehicleVoiceControl.KEY_PACKAGE),
+                "voice key package shares VehicleVoiceControl");
+        check(VehicleComponents.VOICE_ASSISTANT_PACKAGE.equals(
+                VehicleVoiceControl.ASSISTANT_PACKAGE),
+                "voice assistant package shares VehicleVoiceControl");
+        VehicleComponents.Presence none = VehicleComponents.Presence.MISSING;
+        VehicleComponents.Presence ok = VehicleComponents.Presence.PRESENT;
+        VehicleComponents.Presence off = VehicleComponents.Presence.DISABLED;
+
+        // 仪表：全部启用才通过，文案只给结论
+        String[] clusterPackages = VehicleComponents.CLUSTER_PACKAGES;
+        check(clusterPackages.length == 2, "cluster catalog has two packages");
+        SettingsScreens.CheckResult allPresent = VehicleComponents.cluster(
+                clusterPackages,
+                new VehicleComponents.Presence[]{ok, ok});
+        check(allPresent.ok, "all cluster packages present => ok");
+        check("可用".equals(allPresent.text), "cluster ok text is 可用");
+        SettingsScreens.CheckResult partial = VehicleComponents.cluster(clusterPackages,
+                new VehicleComponents.Presence[]{ok, none});
+        check(!partial.ok, "one missing cluster package fails");
+        check(partial.text.startsWith("不可用"), "cluster failure text starts with 不可用");
+        check(partial.text.contains(clusterPackages[1]), "cluster failure names the missing package");
+        check(!partial.text.contains(clusterPackages[0]),
+                "cluster failure omits the healthy package");
+        check(!VehicleComponents.cluster(clusterPackages,
+                new VehicleComponents.Presence[]{ok, off}).ok,
+                "one disabled cluster package fails");
+
+        // 大灯联动：必须"类存在 + 已绑定"才算可用
+        SettingsScreens.CheckResult noClass =
+                VehicleComponents.mcu(false, none, false, "", "未读取");
+        check(!noClass.ok, "missing McuManager fails");
+        check(noClass.text.contains("没有 McuManager"), "missing McuManager explains why");
+        SettingsScreens.CheckResult notBound = VehicleComponents.mcu(true, ok, false, "", "未读取");
+        check(!notBound.ok, "class present but unbound fails");
+        check("不可用：尚未连上车机 MCU".equals(notBound.text), "unbound text");
+        SettingsScreens.CheckResult available = VehicleComponents.mcu(true, ok, true, "", "大灯开");
+        check(available.ok, "bound MCU passes");
+        check(available.text.startsWith("可用"), "bound MCU text starts with 可用");
+        SettingsScreens.CheckResult bindFailed =
+                VehicleComponents.mcu(true, ok, false, "NoSuchMethod", "未读取");
+        check(!bindFailed.ok, "bind error fails");
+        check(bindFailed.text.contains("NoSuchMethod"), "bind error is surfaced");
+        SettingsScreens.CheckResult noService =
+                VehicleComponents.mcu(true, none, false, "NoSuchMethod", "未读取");
+        check(!noService.ok, "missing MCU service package fails");
+        check(noService.text.contains("服务包未安装"),
+                "missing MCU service package reported before bind error");
+        // 绑定成功已经证明服务在跑，包名查不到也不影响结论
+        check(VehicleComponents.mcu(true, none, true, "", "大灯关").ok,
+                "bound MCU passes even if package lookup missed it");
+
+        // 原车语音：判据是"还有没有在抢按键"，禁用或未安装都算不存在
+        check(!VehicleComponents.voice(ok, ok).ok, "both voice apps enabled fails");
+        check(!VehicleComponents.voice(ok, off).ok, "key app still enabled fails");
+        SettingsScreens.CheckResult voicePresent = VehicleComponents.voice(ok, none);
+        check(!voicePresent.ok, "key app enabled fails");
+        check(voicePresent.text.startsWith("存在语音助手"),
+                "active voice text starts with 存在语音助手");
+        check(voicePresent.text.contains(VehicleComponents.VOICE_KEY_PACKAGE),
+                "active voice names the enabled package");
+        SettingsScreens.CheckResult gone = VehicleComponents.voice(none, none);
+        check(gone.ok, "nothing installed passes");
+        check("不存在".equals(gone.text), "missing voice text is 不存在");
+        check(VehicleComponents.voice(off, off).ok, "both disabled passes");
+        check(VehicleComponents.voice(off, none).ok, "disabled key only passes");
+        check("不存在".equals(VehicleComponents.voice(off, off).text),
+                "disabled voice also reports 不存在");
     }
 
     private static void testClusterNaviBridge() {

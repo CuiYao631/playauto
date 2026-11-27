@@ -1400,6 +1400,21 @@ public final class ConnectionService extends Service {
         return headlightNightMode.probe();
     }
 
+    /** 本次会话是否已绑上车机 MCU（未连接时也只能是 {@code false}）。 */
+    boolean mcuBound() {
+        return headlightNightMode.mcuAvailable();
+    }
+
+    /** 最近一次 MCU 绑定失败原因；空串表示没有失败过。 */
+    String mcuBindError() {
+        return headlightNightMode.bindError();
+    }
+
+    /** 最近一次读到的灯光原始值，供环境检测显示。 */
+    String mcuRawStatus() {
+        return headlightNightMode.lastRawStatus();
+    }
+
     /** 上次写入连接详情的大灯状态说明，避免重复记录刷满诊断缓冲。 */
     private String lastHeadlightDiagnostic = "";
     /** 上一次检查时大灯联动是否不可用，用于记录「恢复可用」。 */

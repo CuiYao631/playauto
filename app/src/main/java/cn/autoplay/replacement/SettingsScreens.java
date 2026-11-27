@@ -559,32 +559,15 @@ final class SettingsScreens {
      * 普通广播不会拉起这些服务。
      */
     private void checkClusterComponents() {
-        String[] packages = {
-                "com.chinatsp.dual.service",
-                "com.chinatsp.tsetservices",
-                "com.chinatsp.mcuservice2",
-        };
+        String[] packages = VehicleComponents.CLUSTER_PACKAGES;
         StringBuilder report = new StringBuilder("原车组件自检（仅安装/启用状态，"
                 + "不代表服务在运行）：");
         for (String packageName : packages) {
-            String state;
-            int color;
-            try {
-                android.content.pm.ApplicationInfo info =
-                        host.getPackageManager().getApplicationInfo(packageName, 0);
-                if (info.enabled) {
-                    state = "已安装并启用";
-                    color = Ui.TEXT;
-                } else {
-                    state = "已安装但被禁用";
-                    color = Ui.WARNING;
-                }
-            } catch (android.content.pm.PackageManager.NameNotFoundException exception) {
-                state = "未安装";
-                color = Ui.ERROR;
-            }
-            report.append('\n').append(packageName).append('：').append(state);
-            android.util.Log.i("AutoPlayClusterNavi", packageName + " → " + state);
+            VehicleComponents.Presence state = VehicleComponents.presence(host, packageName);
+            report.append('\n').append(packageName).append('：')
+                    .append(VehicleComponents.describe(state));
+            android.util.Log.i("AutoPlayClusterNavi",
+                    packageName + " → " + VehicleComponents.describe(state));
         }
         report.append("\n\n若任一组件未安装/禁用，先诊断原车服务，不要改本应用的协议字段。");
         setClusterNaviMessage(report.toString(), Ui.TEXT_SECONDARY);
@@ -715,7 +698,8 @@ final class SettingsScreens {
         summaryText.setOrientation(LinearLayout.VERTICAL);
         summaryText.setPadding(dp(16), 0, 0, 0);
         TextView summaryTitle = Ui.text(host, "检测中...", 18, Ui.TEXT, true);
-        TextView summaryHint = Ui.text(host, "检测结果仅供参考", 13, Ui.TEXT_SECONDARY, false);
+        TextView summaryHint = Ui.text(host,
+                "「可用」只代表组件已安装启用，不代表服务正在运行", 13, Ui.TEXT_SECONDARY, false);
         summaryText.addView(summaryTitle);
         summaryText.addView(summaryHint);
         summary.addView(summaryText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
@@ -727,14 +711,29 @@ final class SettingsScreens {
         CheckRow usb = checkRow("USB检测");
         CheckRow decode = checkRow("解码检测");
 
+        section("原车组件");
+        CheckRow cluster = checkRow("仪表投射");
+        CheckRow mcu = checkRow("大灯联动");
+        CheckRow voice = checkRow("原车语音禁用");
+
         handler.postDelayed(() -> {
             CheckResult micResult = host.checkMicrophone();
             CheckResult usbResult = host.checkUsb();
             CheckResult decodeResult = checkDecoder();
+            CheckResult clusterResult = host.checkClusterComponents();
+            CheckResult mcuResult = host.checkMcu();
+            CheckResult voiceResult = host.checkVehicleVoice();
             mic.show(micResult);
             usb.show(usbResult);
             decode.show(decodeResult);
-            boolean allOk = micResult.ok && usbResult.ok && decodeResult.ok;
+            cluster.show(clusterResult);
+            mcu.show(mcuResult);
+            voice.show(voiceResult);
+            // MCU 只在启用「大灯联动」时才算进总体结论：不联动时它不可用不影响任何功能
+            boolean mcuRequired = prefs().getInt("night_mode", 2) == 3;
+            boolean allOk = micResult.ok && usbResult.ok && decodeResult.ok
+                    && clusterResult.ok && voiceResult.ok
+                    && (!mcuRequired || mcuResult.ok);
             holder.showResult(allOk);
             summaryTitle.setText(allOk ? "检测完成" : "存在问题");
             summaryTitle.setTextColor(allOk ? Ui.ACCENT : Ui.WARNING);

@@ -134,6 +134,21 @@ final class HeadlightNightMode {
     }
 
     /**
+     * 反射判断车机 MCU 管理接口是否存在，不看是否已绑定。
+     *
+     * <p>供环境检测页使用：绑定状态需要走完整绑定流程，而「本机到底有没有这个
+     * 接口」是一个纯类存在性问题，普通手机上就能立刻得到结论。
+     */
+    static boolean managerClassPresent() {
+        try {
+            Class.forName(MCU_MANAGER);
+            return true;
+        } catch (ClassNotFoundException | LinkageError exception) {
+            return false;
+        }
+    }
+
+    /**
      * 把 MCU 状态对象解释成夜间模式取值。
      *
      * <p>只在真正认出「开」或「关」时才改变状态；无法识别（{@code null}、

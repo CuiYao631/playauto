@@ -2236,6 +2236,46 @@ public final class MainActivity extends Activity {
         return new SettingsScreens.CheckResult(false, "请插入USB设备");
     }
 
+    /** 环境检测：原车仪表投射组件（只判安装/启用，不代表服务在运行）。 */
+    SettingsScreens.CheckResult checkClusterComponents() {
+        String[] packages = VehicleComponents.CLUSTER_PACKAGES;
+        VehicleComponents.Presence[] states = new VehicleComponents.Presence[packages.length];
+        for (int index = 0; index < packages.length; index++) {
+            states[index] = VehicleComponents.presence(this, packages[index]);
+            android.util.Log.i("AutoPlayClusterNavi",
+                    packages[index] + " → " + VehicleComponents.describe(states[index]));
+        }
+        return VehicleComponents.cluster(packages, states);
+    }
+
+    /** 环境检测：车机 MCU 与大灯联动。未连接时绑定状态未知，按未绑定报告。 */
+    SettingsScreens.CheckResult checkMcu() {
+        boolean classPresent = HeadlightNightMode.managerClassPresent();
+        VehicleComponents.Presence servicePackage =
+                VehicleComponents.presence(this, VehicleComponents.MCU_SERVICE_PACKAGE);
+        ConnectionService service = connectionService;
+        boolean bound = service != null && service.mcuBound();
+        String bindError = "";
+        String rawStatus = "未读取";
+        if (service != null) {
+            bindError = service.mcuBindError();
+            rawStatus = service.mcuRawStatus();
+        }
+        SettingsScreens.CheckResult result = VehicleComponents.mcu(classPresent,
+                servicePackage, bound, bindError, rawStatus);
+        android.util.Log.i("AutoPlayHeadlights", "环境检测 MCU：" + result.text);
+        return result;
+    }
+
+    /** 环境检测：原车语音是否仍会抢按键与唤醒词。 */
+    SettingsScreens.CheckResult checkVehicleVoice() {
+        SettingsScreens.CheckResult result = VehicleComponents.voice(
+                VehicleComponents.presence(this, VehicleComponents.VOICE_KEY_PACKAGE),
+                VehicleComponents.presence(this, VehicleComponents.VOICE_ASSISTANT_PACKAGE));
+        android.util.Log.i("AutoPlayVoice", "环境检测语音：" + result.text);
+        return result;
+    }
+
     void showCarLogoPicker() {
         if (carLogoOptions == null || carLogoOptions.isEmpty()) {
             Toast.makeText(this, "未能读取汽车图标列表", Toast.LENGTH_SHORT).show();
